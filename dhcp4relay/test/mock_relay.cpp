@@ -997,6 +997,32 @@ static relay_config make_relay_of_relay_config(const std::string &agent_relay_mo
     return config;
 }
 
+TEST(DHCPRelayTest, from_client_first_hop_with_option82_is_dropped) {
+    relay_config config = make_relay_of_relay_config("discard");
+
+    pcpp::MacAddress clientMac(std::string("00:0e:86:11:c0:75"));
+    pcpp::DhcpLayer dhcpLayer(pcpp::DHCP_DISCOVER, clientMac);
+    dhcpLayer.getDhcpHeader()->hops = 0;
+    dhcpLayer.getDhcpHeader()->gatewayIpAddress = 0;
+    dhcpLayer.getDhcpHeader()->magicNumber = DHCP_MAGIC_NUMBER;
+    encode_relay_option(&dhcpLayer, &config);
+
+    auto original_option =
+        dhcpLayer.getOptionData(pcpp::DHCPOPT_DHCP_AGENT_OPTIONS);
+    ASSERT_TRUE(original_option.isNotNull());
+    const size_t original_header_len = dhcpLayer.getHeaderLen();
+    const size_t original_option_size = original_option.getDataSize();
+
+    EXPECT_GLOBAL_CALL(send_udp, send_udp(_, _, _, _, _, _, _)).Times(0);
+    from_client(&dhcpLayer, config);
+
+    EXPECT_EQ(dhcpLayer.getDhcpHeader()->gatewayIpAddress, 0u);
+    EXPECT_EQ(dhcpLayer.getDhcpHeader()->hops, 0);
+    EXPECT_EQ(dhcpLayer.getHeaderLen(), original_header_len);
+    EXPECT_EQ(dhcpLayer.getOptionData(pcpp::DHCPOPT_DHCP_AGENT_OPTIONS).getDataSize(),
+              original_option_size);
+}
+
 /* agent_relay_mode=append: packet already has Option 82; we should append ours and forward. */
 TEST(DHCPRelayTest, from_client_relay_of_relay_append) {
     relay_config config = make_relay_of_relay_config("append");

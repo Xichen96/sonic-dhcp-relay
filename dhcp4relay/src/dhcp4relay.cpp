@@ -573,6 +573,14 @@ void encode_relay_option(pcpp::DhcpLayer *dhcp_pkt, relay_config *config) {
 void from_client(pcpp::DhcpLayer *dhcp_pkt, relay_config &config) {
     /* Update giaddr */
     if (!(dhcp_pkt->getDhcpHeader()->gatewayIpAddress)) {
+        auto agent_option = dhcp_pkt->getOptionData(pcpp::DHCPOPT_DHCP_AGENT_OPTIONS);
+        if (agent_option.isNotNull()) {
+            SWSS_LOG_NOTICE("[DHCPV4_RELAY] Dropping first-hop packet with pre-existing Option 82 on untrusted interface %s",
+                    config.vlan.c_str());
+            dhcp_cntr_table.increment_counter(config.vlan, "TX", DHCPv4_MESSAGE_TYPE_DROP);
+            return;
+        }
+
         if (config.source_interface.length() > 0) {
             /* find the IP of the interface and update to giaddr */
             dhcp_pkt->getDhcpHeader()->gatewayIpAddress =
