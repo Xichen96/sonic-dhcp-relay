@@ -601,7 +601,11 @@ void from_client(pcpp::DhcpLayer *dhcp_pkt, relay_config &config) {
            forward - Forward the packet unchanged (no Option 82 modification).
            discard - Discard the incoming packet (default).
          */
-        if (config.agent_relay_mode == "append") {
+        auto agent_option = dhcp_pkt->getOptionData(pcpp::DHCPOPT_DHCP_AGENT_OPTIONS);
+        if (agent_option.isNull()) {
+            SWSS_LOG_DEBUG("[DHCPV4_RELAY] Forwarding chained packet without Option 82 on %s",
+                    config.vlan.c_str());
+        } else if (config.agent_relay_mode == "append") {
             encode_relay_option(dhcp_pkt, &config);
         } else if (config.agent_relay_mode == "replace") {
             dhcp_pkt->removeOption(pcpp::DHCPOPT_DHCP_AGENT_OPTIONS);

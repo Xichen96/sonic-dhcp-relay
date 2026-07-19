@@ -997,6 +997,29 @@ static relay_config make_relay_of_relay_config(const std::string &agent_relay_mo
     return config;
 }
 
+TEST(DHCPRelayTest, from_client_relay_of_relay_without_option82_forwards) {
+    relay_config config = make_relay_of_relay_config("discard");
+
+    pcpp::MacAddress clientMac(std::string("00:0e:86:11:c0:75"));
+    pcpp::DhcpLayer dhcpLayer(pcpp::DHCP_DISCOVER, clientMac);
+    dhcpLayer.getDhcpHeader()->hops = 2;
+    dhcpLayer.getDhcpHeader()->gatewayIpAddress = inet_addr("192.168.1.1");
+
+    EXPECT_GLOBAL_CALL(send_udp, send_udp(_, _, _, _, _, _, _)).WillOnce([]
+            (int, uint8_t *hdr, struct sockaddr_in, uint32_t, in_addr, bool, bool) {
+        pcpp::dhcp_header *dhcp_hdr = reinterpret_cast<pcpp::dhcp_header *>(hdr);
+        EXPECT_EQ(dhcp_hdr->hops, 3);
+        EXPECT_EQ(dhcp_hdr->gatewayIpAddress, inet_addr("192.168.1.1"));
+        return true;
+    });
+
+    from_client(&dhcpLayer, config);
+
+    EXPECT_EQ(dhcpLayer.getDhcpHeader()->hops, 3);
+    EXPECT_EQ(dhcpLayer.getDhcpHeader()->gatewayIpAddress, inet_addr("192.168.1.1"));
+    EXPECT_TRUE(dhcpLayer.getOptionData(pcpp::DHCPOPT_DHCP_AGENT_OPTIONS).isNull());
+}
+
 /* agent_relay_mode=append: packet already has Option 82; we should append ours and forward. */
 TEST(DHCPRelayTest, from_client_relay_of_relay_append) {
     relay_config config = make_relay_of_relay_config("append");
