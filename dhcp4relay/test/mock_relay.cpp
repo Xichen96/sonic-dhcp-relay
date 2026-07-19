@@ -1020,6 +1020,38 @@ TEST(DHCPRelayTest, from_client_relay_of_relay_without_option82_forwards) {
     EXPECT_TRUE(dhcpLayer.getOptionData(pcpp::DHCPOPT_DHCP_AGENT_OPTIONS).isNull());
 }
 
+TEST(DHCPRelayTest, from_client_relay_of_relay_ignores_option82_after_end) {
+    relay_config config = make_relay_of_relay_config("discard");
+    const uint8_t options[] = {
+        static_cast<uint8_t>(pcpp::DHCPOPT_DHCP_MESSAGE_TYPE), 1,
+        static_cast<uint8_t>(pcpp::DHCP_DISCOVER),
+        static_cast<uint8_t>(pcpp::DHCPOPT_PAD),
+        static_cast<uint8_t>(pcpp::DHCPOPT_END),
+        static_cast<uint8_t>(pcpp::DHCPOPT_DHCP_AGENT_OPTIONS), 2, 1, 0,
+    };
+    const size_t packet_len = sizeof(pcpp::dhcp_header) + sizeof(options);
+    auto *packet = new uint8_t[packet_len]();
+    auto *dhcp_header = reinterpret_cast<pcpp::dhcp_header *>(packet);
+    dhcp_header->hops = 2;
+    dhcp_header->gatewayIpAddress = inet_addr("192.168.1.1");
+    dhcp_header->magicNumber = DHCP_MAGIC_NUMBER;
+    memcpy(packet + sizeof(pcpp::dhcp_header), options, sizeof(options));
+    pcpp::DhcpLayer dhcpLayer(packet, packet_len, nullptr, nullptr);
+
+    EXPECT_GLOBAL_CALL(send_udp, send_udp(_, _, _, _, _, _, _)).WillOnce([]
+            (int, uint8_t *hdr, struct sockaddr_in, uint32_t, in_addr, bool, bool) {
+        auto *forwarded_header = reinterpret_cast<pcpp::dhcp_header *>(hdr);
+        EXPECT_EQ(forwarded_header->hops, 3);
+        EXPECT_EQ(forwarded_header->gatewayIpAddress, inet_addr("192.168.1.1"));
+        return true;
+    });
+
+    from_client(&dhcpLayer, config);
+
+    EXPECT_EQ(dhcpLayer.getDhcpHeader()->hops, 3);
+    EXPECT_EQ(dhcpLayer.getHeaderLen(), packet_len);
+}
+
 /* agent_relay_mode=append: packet already has Option 82; we should append ours and forward. */
 TEST(DHCPRelayTest, from_client_relay_of_relay_append) {
     relay_config config = make_relay_of_relay_config("append");
