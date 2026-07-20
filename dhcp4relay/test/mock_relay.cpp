@@ -801,10 +801,14 @@ TEST(DHCPRelayTest, encode_relay_option) {
     memcpy(&link_sel_ip, link_sel_ip_ptr, sizeof(link_sel_ip));
     EXPECT_EQ(config.link_address.sin_addr.s_addr, link_sel_ip);
 
-    auto srv_ovr_ride = decode_tlv((const uint8_t *)options_ptr, OPTION82_SUBOPT_SERVER_OVERRIDE,
-                                    link_sel_len, agent_option_size);
-    auto srv_ip = *((uint32_t *)srv_ovr_ride);
-    EXPECT_EQ(srv_ip, config.link_address.sin_addr.s_addr);
+    uint8_t server_override_len = 0;
+    auto server_override_ptr = decode_tlv((const uint8_t *)options_ptr, OPTION82_SUBOPT_SERVER_OVERRIDE,
+                                           server_override_len, agent_option_size);
+    ASSERT_NE(server_override_ptr, nullptr);
+    ASSERT_EQ(server_override_len, sizeof(uint32_t));
+    uint32_t server_override_ip;
+    memcpy(&server_override_ip, server_override_ptr, sizeof(server_override_ip));
+    EXPECT_EQ(server_override_ip, config.link_address.sin_addr.s_addr);
 
     uint8_t vrf_len = 0;
     auto vrf_ptr = decode_tlv((const uint8_t *)options_ptr, OPTION82_SUBOPT_VIRTUAL_SUBNET,
@@ -879,10 +883,14 @@ TEST(DHCPRelayTest, encode_relay_option_server_client_same_vrf) {
     memcpy(&link_sel_ip, link_sel_ip_ptr, sizeof(link_sel_ip));
     EXPECT_EQ(config.link_address.sin_addr.s_addr, link_sel_ip);
 
-    auto srv_ovr_ride = decode_tlv((const uint8_t *)options_ptr, OPTION82_SUBOPT_SERVER_OVERRIDE,
-                                    link_sel_len, agent_option_size);
-    auto srv_ip = *((uint32_t *)srv_ovr_ride);
-    EXPECT_EQ(srv_ip, config.link_address.sin_addr.s_addr);
+    uint8_t server_override_len = 0;
+    auto server_override_ptr = decode_tlv((const uint8_t *)options_ptr, OPTION82_SUBOPT_SERVER_OVERRIDE,
+                                           server_override_len, agent_option_size);
+    ASSERT_NE(server_override_ptr, nullptr);
+    ASSERT_EQ(server_override_len, sizeof(uint32_t));
+    uint32_t server_override_ip;
+    memcpy(&server_override_ip, server_override_ptr, sizeof(server_override_ip));
+    EXPECT_EQ(server_override_ip, config.link_address.sin_addr.s_addr);
 
     uint8_t vrf_len = 0;
     uint8_t *vrf_ptr = NULL;
