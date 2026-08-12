@@ -11,6 +11,7 @@
 #include "mock_relay.h"
 #include "mock_table.h"
 #include "../src/dhcp4_sender.h"
+#include "../src/dhcp4relay_stats.h"
 #include <sys/syscall.h>
 
 #include <pcapplusplus/DhcpLayer.h>
@@ -25,6 +26,8 @@
 
 using namespace ::testing;
 using namespace swss;
+
+extern DHCPCounter_table dhcp_cntr_table;
 
 MOCK_GLOBAL_FUNC1(getifaddrs, int(struct ifaddrs **));
 MOCK_GLOBAL_FUNC1(freeifaddrs, void(struct ifaddrs *));
@@ -367,6 +370,50 @@ TEST(prepareConfig, update_vlan_mapping) {
     portchannel_map.clear();
 }
 
+TEST(prepareConfig, update_vlan_mapping_stale_delete) {
+    swss::Table vlan_member_table(config_db.get(), "VLAN_MEMBER");
+    swss::Table portchannel_member_table(config_db.get(), "PORTCHANNEL_MEMBER");
+    swss::Table vlan_interface_table(config_db.get(), "VLAN_INTERFACE");
+    std::vector<std::pair<std::string, std::string>> values = {
+            {"tagging_mode", "untagged"},
+    };
+    std::vector<std::pair<std::string, std::string>> vlan_values = {
+            {"vrf_name", "default"},
+    };
+
+    vlan_map.clear();
+    portchannel_map.clear();
+    vlan_member_table.set("Vlan100|PortChannel1005", values);
+    vlan_member_table.set("Vlan200|PortChannel1005", values);
+    portchannel_member_table.set("PortChannel1005|Ethernet12", values);
+    vlan_interface_table.set("Vlan100", vlan_values);
+    vlan_interface_table.set("Vlan200", vlan_values);
+
+    update_vlan_mapping("Vlan100", true);
+    update_vlan_mapping("Vlan200", true);
+    dhcp_cntr_table.increment_counter("Vlan200", "RX", DHCPv4_MESSAGE_TYPE_DISCOVER);
+
+    vlan_member_table.del("Vlan100|PortChannel1005");
+    update_vlan_mapping("Vlan100", false);
+    EXPECT_EQ(vlan_map["PortChannel1005"], "Vlan200");
+    EXPECT_EQ(portchannel_map["Ethernet12"], "PortChannel1005");
+    auto counters = dhcp_cntr_table.get_counters_data();
+    ASSERT_EQ(counters.count("Vlan200"), 1);
+    EXPECT_EQ(counters.at("Vlan200").RX.at(counter_map.at(DHCPv4_MESSAGE_TYPE_DISCOVER)), 1);
+
+    vlan_member_table.del("Vlan200|PortChannel1005");
+    portchannel_member_table.del("PortChannel1005|Ethernet12");
+    update_vlan_mapping("Vlan200", false);
+    EXPECT_EQ(vlan_map.find("PortChannel1005"), vlan_map.end());
+    EXPECT_EQ(portchannel_map.find("Ethernet12"), portchannel_map.end());
+    EXPECT_EQ(dhcp_cntr_table.get_counters_data().count("Vlan200"), 0);
+
+    vlan_interface_table.del("Vlan100");
+    vlan_interface_table.del("Vlan200");
+    vlan_map.clear();
+    portchannel_map.clear();
+}
+
 TEST(relayConfig, handle_vlan_events) {
     event_config event;
     EXPECT_GLOBAL_CALL(write, write(_, _, _))
@@ -544,6 +591,9 @@ TEST(relayConfig, handle_vlan_member_events) {
     vlans["Vlan100"].vlan = "Vlan100";
     vlans["Vlan100"].client_sock = -1;
     vlans["Vlan100"].is_add = true;
+    vlans["Vlan200"].vlan = "Vlan200";
+    vlans["Vlan200"].client_sock = -1;
+    vlans["Vlan200"].is_add = true;
     vlan_map.clear();
     portchannel_map.clear();
     portchannel_member_table.set("PortChannel1005|Ethernet12", values);
@@ -566,6 +616,16 @@ TEST(relayConfig, handle_vlan_member_events) {
     EXPECT_EQ(portchannel_map["Ethernet12"], "PortChannel1005");
     EXPECT_GE(vlans["Vlan100"].client_sock, 0);
 
+    vlan_member_config *vlan_config_move = new vlan_member_config();
+    vlan_config_move->is_add = true;
+    vlan_config_move->interface = "PortChannel1005";
+    vlan_config_move->vlan = "Vlan200";
+    event.msg = static_cast<void *>(vlan_config_move);
+    ASSERT_NE(write(pipe_fds[1], &event, sizeof(event)), -1);
+    config_event_callback(pipe_fds[0], 0, &vlans);
+    EXPECT_EQ(vlan_map["PortChannel1005"], "Vlan200");
+    EXPECT_EQ(portchannel_map["Ethernet12"], "PortChannel1005");
+
     vlan_member_config *vlan_config_del = new vlan_member_config();
 
     vlans["Vlan100"].client_sock = -1;
@@ -577,6 +637,17 @@ TEST(relayConfig, handle_vlan_member_events) {
 
     ASSERT_NE(write(pipe_fds[1], &event, sizeof(event)), -1);
 
+    config_event_callback(pipe_fds[0], 0, &vlans);
+
+    EXPECT_EQ(vlan_map["PortChannel1005"], "Vlan200");
+    EXPECT_EQ(portchannel_map["Ethernet12"], "PortChannel1005");
+
+    vlan_member_config *current_vlan_config_del = new vlan_member_config();
+    current_vlan_config_del->is_add = false;
+    current_vlan_config_del->interface = "PortChannel1005";
+    current_vlan_config_del->vlan = "Vlan200";
+    event.msg = static_cast<void *>(current_vlan_config_del);
+    ASSERT_NE(write(pipe_fds[1], &event, sizeof(event)), -1);
     config_event_callback(pipe_fds[0], 0, &vlans);
 
     EXPECT_EQ(vlan_map.find("PortChannel1005"), vlan_map.end());
@@ -620,10 +691,18 @@ TEST(relayConfig, handle_portchannel_member_events) {
     process_member("PortChannel1005", true);
     EXPECT_EQ(portchannel_map["Ethernet12"], "PortChannel1005");
 
+    vlan_map["PortChannel1006"] = "Vlan100";
+    process_member("PortChannel1006", true);
+    EXPECT_EQ(portchannel_map["Ethernet12"], "PortChannel1006");
+
     process_member("PortChannel1005", false);
+    EXPECT_EQ(portchannel_map["Ethernet12"], "PortChannel1006");
+
+    process_member("PortChannel1006", false);
     EXPECT_EQ(portchannel_map.find("Ethernet12"), portchannel_map.end());
 
     vlan_map.erase("PortChannel1005");
+    vlan_map.erase("PortChannel1006");
     portchannel_map.clear();
     close(pipe_fds[0]);
     close(pipe_fds[1]);
