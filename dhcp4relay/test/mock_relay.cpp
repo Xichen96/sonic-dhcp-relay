@@ -171,6 +171,24 @@ TEST(EncodeDecodeTLV, EncodeAndDecode) {
     EXPECT_EQ(decoded_value[0], 0x11);
     EXPECT_EQ(decoded_value[1], 0x22);
     EXPECT_EQ(decoded_value[2], 0x33);
+
+    uint8_t empty_buffer[2] = {};
+    encoded_length = encode_tlv(empty_buffer, OPTION82_SUBOPT_VIRTUAL_SUBNET_CONTROL,
+                                0, nullptr);
+    EXPECT_EQ(encoded_length, 2);
+    EXPECT_EQ(empty_buffer[0], OPTION82_SUBOPT_VIRTUAL_SUBNET_CONTROL);
+    EXPECT_EQ(empty_buffer[1], 0);
+
+    decoded_value = decode_tlv(empty_buffer, OPTION82_SUBOPT_VIRTUAL_SUBNET_CONTROL,
+                               length, sizeof(empty_buffer));
+    ASSERT_NE(decoded_value, nullptr);
+    EXPECT_EQ(length, 0);
+
+    uint8_t truncated_buffer[2] = {OPTION82_SUBOPT_VIRTUAL_SUBNET, 1};
+    decoded_value = decode_tlv(truncated_buffer, OPTION82_SUBOPT_VIRTUAL_SUBNET,
+                               length, sizeof(truncated_buffer));
+    EXPECT_EQ(decoded_value, nullptr);
+    EXPECT_EQ(length, 0);
 }
 
 /* A sub-option whose length runs one byte past options_total_size must be
@@ -922,6 +940,13 @@ TEST(DHCPRelayTest, encode_relay_option82) {
     memcpy((vss_buf + 1), (uint8_t*)vlan_vrf_map["Vlan10"].c_str(), (uint8_t)vlan_vrf_map["Vlan10"].length());
 
     EXPECT_EQ(memcmp(vss_buf, vrf_ptr, 6), 0);
+
+    uint8_t vss_control_len = 1;
+    auto vss_control_ptr = decode_tlv((const uint8_t *)options_ptr,
+                                      OPTION82_SUBOPT_VIRTUAL_SUBNET_CONTROL,
+                                      vss_control_len, agent_option_size);
+    ASSERT_NE(vss_control_ptr, nullptr);
+    EXPECT_EQ(vss_control_len, 0);
 }
 
 TEST(DHCPRelayTest, encode_relay_option82_server_client_same_vrf) {
@@ -1000,6 +1025,60 @@ TEST(DHCPRelayTest, encode_relay_option82_server_client_same_vrf) {
                            vrf_len, agent_option_size);
 
     EXPECT_EQ((uintptr_t)vrf_ptr, NULL);
+
+    uint8_t vss_control_len = 0;
+    auto vss_control_ptr = decode_tlv((const uint8_t *)options_ptr,
+                                      OPTION82_SUBOPT_VIRTUAL_SUBNET_CONTROL,
+                                      vss_control_len, agent_option_size);
+    EXPECT_EQ((uintptr_t)vss_control_ptr, NULL);
+}
+
+static uint32_t build_vss_reply_options(uint8_t *options, const std::string &vrf,
+                                        bool include_vss, bool include_vss_control) {
+    uint32_t offset = 0;
+    if (include_vss) {
+        std::vector<uint8_t> vss_data(vrf.length() + 1, 0);
+        memcpy(vss_data.data() + 1, vrf.data(), vrf.length());
+        offset += encode_tlv(options + offset, OPTION82_SUBOPT_VIRTUAL_SUBNET,
+                             static_cast<uint8_t>(vss_data.size()), vss_data.data());
+    }
+    if (include_vss_control) {
+        offset += encode_tlv(options + offset, OPTION82_SUBOPT_VIRTUAL_SUBNET_CONTROL,
+                             0, nullptr);
+    }
+    return offset;
+}
+
+TEST(DHCPRelayTest, validate_vss_reply) {
+    relay_config config = {};
+    config.vlan = "Vlan10";
+    config.vrf = "Vrf03";
+    config.vrf_selection_opt = "enable";
+    vlan_vrf_map["Vlan10"] = "Vrf01";
+
+    uint8_t options[32] = {};
+    auto options_size = build_vss_reply_options(options, "Vrf01", true, false);
+    EXPECT_TRUE(validate_vss_reply(options, options_size, config, "192.0.2.1"));
+
+    options_size = build_vss_reply_options(options, "Vrf01", true, true);
+    EXPECT_FALSE(validate_vss_reply(options, options_size, config, "192.0.2.1"));
+
+    options_size = build_vss_reply_options(options, "Vrf01", true, false);
+    options[options_size++] = OPTION82_SUBOPT_VIRTUAL_SUBNET_CONTROL;
+    options[options_size++] = 1;
+    EXPECT_FALSE(validate_vss_reply(options, options_size, config, "192.0.2.1"));
+
+    options_size = build_vss_reply_options(options, "Vrf02", true, false);
+    EXPECT_FALSE(validate_vss_reply(options, options_size, config, "192.0.2.1"));
+
+    EXPECT_FALSE(validate_vss_reply(nullptr, 0, config, "192.0.2.1"));
+
+    options_size = build_vss_reply_options(options, "Vrf01", false, false);
+    EXPECT_FALSE(validate_vss_reply(options, options_size, config, "192.0.2.1"));
+
+    uint8_t circuit_id = 1;
+    options_size = encode_tlv(options, OPTION82_SUBOPT_CIRCUIT_ID, 1, &circuit_id);
+    EXPECT_FALSE(validate_vss_reply(options, options_size, config, "192.0.2.1"));
 }
 
 static relay_config make_option_overflow_config(bool vss_required) {
@@ -1176,6 +1255,8 @@ TEST(DHCPRelayTest, to_client) {
     relay_config config = {};
     config.phy_interface = "Ethernet12";
     config.vlan = "Vlan10";
+    config.vrf = "Vrf01";
+    config.client_sock = 1;
     config.link_selection_opt = "enable";
     config.server_id_override_opt = "enable";
     config.link_address.sin_addr.s_addr = inet_addr("192.168.10.10");
