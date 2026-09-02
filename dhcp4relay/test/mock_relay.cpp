@@ -1287,6 +1287,33 @@ TEST(DHCPRelayTest, to_client) {
     to_client(&dhcpLayer, &vlans, "172.22.178.234");
 }
 
+TEST(DHCPRelayTest, to_client_bootp_skips_vss_validation) {
+    pcpp::MacAddress clientMac(std::string("00:0e:86:11:c0:75"));
+    pcpp::DhcpLayer bootpLayer(pcpp::DHCP_OFFER, clientMac);
+    bootpLayer.getDhcpHeader()->magicNumber = 0;
+    bootpLayer.getDhcpHeader()->gatewayIpAddress = inet_addr("192.168.1.1");
+
+    relay_config config = {};
+    config.vlan = "Vlan10";
+    config.vrf = "Vrf02";
+    config.vrf_selection_opt = "enable";
+    config.client_sock = 1;
+    vlan_vrf_map["Vlan10"] = "Vrf01";
+    std::unordered_map<std::string, relay_config> vlans = {{"Vlan10", config}};
+
+    struct ifaddrs *mock_ifaddrs =
+        CreateMockIfaddrs("192.168.1.1", "255.255.255.0", "Vlan10",
+                          "192.168.1.2", "Ethernet4");
+    EXPECT_GLOBAL_CALL(getifaddrs, getifaddrs(_))
+        .WillOnce(DoAll(testing::SetArgPointee<0>(mock_ifaddrs), Return(0)));
+    EXPECT_GLOBAL_CALL(freeifaddrs, freeifaddrs(_)).Times(1);
+    EXPECT_GLOBAL_CALL(send_udp, send_udp(_, _, _, _, _, _, _))
+        .WillOnce(Return(true));
+
+    to_client(&bootpLayer, &vlans, "172.22.178.234");
+    FreeMockIfaddrs(mock_ifaddrs);
+}
+
 TEST(DHCPRelayTest, from_client) {
 
     pcpp::MacAddress clientMac(std::string("00:0e:86:11:c0:75"));
