@@ -1503,6 +1503,63 @@ TEST(DHCPRelayTest, from_client_relay_of_relay_forward) {
     from_client(&dhcpLayer, config);
 }
 
+TEST(DHCPRelayTest, from_client_relay_of_relay_forward_with_vss_forwards_unchanged) {
+    relay_config config = make_relay_of_relay_config("forward");
+
+    pcpp::MacAddress clientMac(std::string("00:0e:86:11:c0:75"));
+    pcpp::DhcpLayer dhcpLayer(pcpp::DHCP_DISCOVER, clientMac);
+    dhcpLayer.getDhcpHeader()->hops = 0;
+    dhcpLayer.getDhcpHeader()->gatewayIpAddress = inet_addr("192.168.1.1");
+    encode_relay_option82(&dhcpLayer, &config);
+    auto original_option =
+        dhcpLayer.getOptionData(pcpp::DHCPOPT_DHCP_AGENT_OPTIONS);
+    ASSERT_FALSE(original_option.isNull());
+    std::vector<uint8_t> original_option_data(
+        original_option.getValue(),
+        original_option.getValue() + original_option.getDataSize());
+
+    config.vrf_selection_opt = "enable";
+    config.vrf = "Vrf02";
+
+    EXPECT_GLOBAL_CALL(send_udp, send_udp(_, _, _, _, _, _, _))
+        .WillOnce(Return(true));
+    from_client(&dhcpLayer, config);
+
+    auto forwarded_option =
+        dhcpLayer.getOptionData(pcpp::DHCPOPT_DHCP_AGENT_OPTIONS);
+    ASSERT_EQ(forwarded_option.getDataSize(), original_option_data.size());
+    EXPECT_EQ(memcmp(forwarded_option.getValue(), original_option_data.data(),
+                     original_option_data.size()), 0);
+}
+
+TEST(DHCPRelayTest, from_client_first_hop_adds_vss_with_forward_configured) {
+    relay_config config = make_option_overflow_config(true);
+    config.agent_relay_mode = "forward";
+
+    pcpp::MacAddress clientMac(std::string("00:0e:86:11:c0:75"));
+    pcpp::DhcpLayer dhcpLayer(pcpp::DHCP_DISCOVER, clientMac);
+    dhcpLayer.getDhcpHeader()->gatewayIpAddress = 0;
+    dhcpLayer.getDhcpHeader()->magicNumber = DHCP_MAGIC_NUMBER;
+
+    EXPECT_GLOBAL_CALL(send_udp, send_udp(_, _, _, _, _, _, _))
+        .WillOnce(Return(true));
+    from_client(&dhcpLayer, config);
+
+    auto relay_option =
+        dhcpLayer.getOptionData(pcpp::DHCPOPT_DHCP_AGENT_OPTIONS);
+    ASSERT_FALSE(relay_option.isNull());
+
+    uint8_t vss_len = 0;
+    EXPECT_NE(decode_tlv(relay_option.getValue(),
+                         OPTION82_SUBOPT_VIRTUAL_SUBNET, vss_len,
+                         relay_option.getDataSize()), nullptr);
+    uint8_t control_len = 1;
+    EXPECT_NE(decode_tlv(relay_option.getValue(),
+                         OPTION82_SUBOPT_VIRTUAL_SUBNET_CONTROL, control_len,
+                         relay_option.getDataSize()), nullptr);
+    EXPECT_EQ(control_len, 0);
+}
+
 /* agent_relay_mode=discard: packet must be dropped, send_udp must NOT be called. */
 TEST(DHCPRelayTest, from_client_relay_of_relay_discard) {
     relay_config config = make_relay_of_relay_config("discard");

@@ -809,11 +809,12 @@ bool validate_vss_reply(const uint8_t *options_ptr, uint32_t options_size,
     }
 
     /*
-     * The request-side prerequisite drops a locally VSS-required request when
-     * Option 82 cannot fit, and the configuration prerequisite forbids VSS
-     * responsibility with agent_relay_mode=forward. Therefore a request that
-     * reaches a server under this VSS-required configuration carried the local
-     * VSS 151+152 pair.
+     * The request-side prerequisite drops a first-hop request owned by this
+     * relay when required local VSS cannot be added. Forward mode applies only
+     * to requests whose non-zero giaddr identifies an upstream relay and
+     * preserves that relay's Option 82, so their replies return upstream.
+     * Therefore a VSS-required reply processed here belongs to a locally owned
+     * request that carried the local VSS 151+152 pair.
      *
      * RFC 3046's ordinary no-space fallback predates RFC 6607. RFC 6607 uses
      * VSS to select the client's VPN address space; without it, the server can
