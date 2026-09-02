@@ -174,7 +174,7 @@ TEST(EncodeDecodeTLV, EncodeAndDecode) {
 
     uint8_t empty_buffer[2] = {};
     encoded_length = encode_tlv(empty_buffer, OPTION82_SUBOPT_VIRTUAL_SUBNET_CONTROL,
-                                0, nullptr);
+                                0, nullptr, sizeof(empty_buffer));
     EXPECT_EQ(encoded_length, 2);
     EXPECT_EQ(empty_buffer[0], OPTION82_SUBOPT_VIRTUAL_SUBNET_CONTROL);
     EXPECT_EQ(empty_buffer[1], 0);
@@ -1033,18 +1033,22 @@ TEST(DHCPRelayTest, encode_relay_option82_server_client_same_vrf) {
     EXPECT_EQ((uintptr_t)vss_control_ptr, NULL);
 }
 
-static uint32_t build_vss_reply_options(uint8_t *options, const std::string &vrf,
-                                        bool include_vss, bool include_vss_control) {
+template <size_t N>
+static uint32_t build_vss_reply_options(uint8_t (&options)[N],
+                                        const std::string &vrf,
+                                        bool include_vss,
+                                        bool include_vss_control) {
     uint32_t offset = 0;
     if (include_vss) {
         std::vector<uint8_t> vss_data(vrf.length() + 1, 0);
         memcpy(vss_data.data() + 1, vrf.data(), vrf.length());
         offset += encode_tlv(options + offset, OPTION82_SUBOPT_VIRTUAL_SUBNET,
-                             static_cast<uint8_t>(vss_data.size()), vss_data.data());
+                             static_cast<uint8_t>(vss_data.size()), vss_data.data(),
+                             N - offset);
     }
     if (include_vss_control) {
         offset += encode_tlv(options + offset, OPTION82_SUBOPT_VIRTUAL_SUBNET_CONTROL,
-                             0, nullptr);
+                             0, nullptr, N - offset);
     }
     return offset;
 }
@@ -1077,7 +1081,8 @@ TEST(DHCPRelayTest, validate_vss_reply) {
     EXPECT_FALSE(validate_vss_reply(options, options_size, config, "192.0.2.1"));
 
     uint8_t circuit_id = 1;
-    options_size = encode_tlv(options, OPTION82_SUBOPT_CIRCUIT_ID, 1, &circuit_id);
+    options_size = encode_tlv(options, OPTION82_SUBOPT_CIRCUIT_ID, 1,
+                              &circuit_id, sizeof(options));
     EXPECT_FALSE(validate_vss_reply(options, options_size, config, "192.0.2.1"));
 }
 
