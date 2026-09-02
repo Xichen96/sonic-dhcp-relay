@@ -330,3 +330,13 @@ void pkt_in_callback(evutil_socket_t fd, short event, void *arg);
 void config_event_callback(evutil_socket_t fd, short event, void *arg);
 size_t encode_tlv(uint8_t *buf, uint8_t t, uint8_t l, const uint8_t *v, size_t remaining);
 uint8_t *decode_tlv(const uint8_t *buf, uint8_t t, uint8_t &l, uint32_t options_total_size);
+#ifdef UNIT_TEST
+uint32_t get_relay_giaddr(const relay_config &config, bool is_dhcp);
+void add_local_relay_addresses(const relay_config &config);
+void remove_local_relay_addresses(
+    const relay_config &config,
+    const std::unordered_map<std::string, relay_config> &vlans);
+void build_local_relay_addresses(
+    const std::unordered_map<std::string, relay_config> &vlans);
+bool is_local_relay_address(uint32_t giaddr);
+#endif

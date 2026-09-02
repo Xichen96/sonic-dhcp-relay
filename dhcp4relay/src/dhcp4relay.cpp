@@ -13,6 +13,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <fstream>
+#include <unordered_set>
 
 #include "configdb.h"
 #include "dhcp4_sender.h"
@@ -90,6 +91,9 @@ DHCPMgr dhcp_mgr;
 
 /* Interfaces list in config DB */
 std::vector<std::string> interface_list;
+
+static std::unordered_set<uint32_t> local_relay_addresses;
+static std::string local_remote_id;
 
 #ifdef UNIT_TEST
 using namespace swss;
@@ -524,10 +528,12 @@ void encode_relay_option(pcpp::DhcpLayer *dhcp_pkt, relay_config *config) {
     /* if its SmartSwitch we need to fetch mac of bridge-midplane */
     if ((m_config.is_SmartSwitch) && (!bm_mac.empty())) {
         uint8_t len = (uint8_t)std::min((size_t)MAC_ADDR_STR_LEN, bm_mac.length());
+        local_remote_id = bm_mac;
         offset = encode_tlv((buf + buf_offset), OPTION82_SUBOPT_REMOTE_ID,
                             len, (uint8_t *)(bm_mac.c_str()), sizeof(buf) - buf_offset);
     } else {
         uint8_t len = (uint8_t)std::min((size_t)MAC_ADDR_STR_LEN, m_config.host_mac_addr.length());
+        local_remote_id = m_config.host_mac_addr;
         offset = encode_tlv((buf + buf_offset), OPTION82_SUBOPT_REMOTE_ID,
                             len, (uint8_t *)(m_config.host_mac_addr.c_str()), sizeof(buf) - buf_offset);
     }
@@ -602,6 +608,58 @@ void encode_relay_option(pcpp::DhcpLayer *dhcp_pkt, relay_config *config) {
     return;
 }
 
+uint32_t get_relay_giaddr(const relay_config &config, bool is_dhcp) {
+    return (is_dhcp && !config.source_interface.empty())
+               ? config.src_intf_sel_addr.sin_addr.s_addr
+               : config.link_address.sin_addr.s_addr;
+}
+
+void add_local_relay_addresses(const relay_config &config) {
+    /* Non-BOOTP packets can use the VLAN IP or the Loopback0 IP on dual-ToR; BOOTP always uses the VLAN IP. */
+    const uint32_t dhcp_giaddr = get_relay_giaddr(config, true);
+    const uint32_t bootp_giaddr = get_relay_giaddr(config, false);
+    if (dhcp_giaddr != 0) {
+        local_relay_addresses.insert(dhcp_giaddr);
+    }
+    if (bootp_giaddr != 0) {
+        local_relay_addresses.insert(bootp_giaddr);
+    }
+}
+
+void remove_local_relay_addresses(
+        const relay_config &config,
+        const std::unordered_map<std::string, relay_config> &vlans) {
+    const uint32_t dhcp_giaddr = get_relay_giaddr(config, true);
+    const uint32_t bootp_giaddr = get_relay_giaddr(config, false);
+    auto remove_if_unused = [&vlans](uint32_t address) {
+        if (address == 0) {
+            return;
+        }
+        for (const auto &entry : vlans) {
+            if (get_relay_giaddr(entry.second, true) == address ||
+                get_relay_giaddr(entry.second, false) == address) {
+                return;
+            }
+        }
+        local_relay_addresses.erase(address);
+    };
+
+    remove_if_unused(dhcp_giaddr);
+    remove_if_unused(bootp_giaddr);
+}
+
+void build_local_relay_addresses(
+        const std::unordered_map<std::string, relay_config> &vlans) {
+    local_relay_addresses.clear();
+    for (const auto &entry : vlans) {
+        add_local_relay_addresses(entry.second);
+    }
+}
+
+bool is_local_relay_address(uint32_t giaddr) {
+    return local_relay_addresses.find(giaddr) != local_relay_addresses.end();
+}
+
 /**
  * @code                 void from_client(pcpp::DhcpLayer* dhcp_pkt, relay_config *config)
  *
@@ -618,14 +676,8 @@ void from_client(pcpp::DhcpLayer *dhcp_pkt, relay_config &config) {
         const bool is_dhcp =
             dhcp_pkt->getDhcpHeader()->magicNumber == DHCP_MAGIC_NUMBER;
 
-        if (is_dhcp && config.source_interface.length() > 0) {
-            /* find the IP of the interface and update to giaddr */
-            dhcp_pkt->getDhcpHeader()->gatewayIpAddress =
-                config.src_intf_sel_addr.sin_addr.s_addr;
-        } else {
-            dhcp_pkt->getDhcpHeader()->gatewayIpAddress =
-                config.link_address.sin_addr.s_addr;
-        }
+        dhcp_pkt->getDhcpHeader()->gatewayIpAddress =
+            get_relay_giaddr(config, is_dhcp);
         if (!(dhcp_pkt->getDhcpHeader()->gatewayIpAddress)) {
             SWSS_LOG_ERROR("[DHCPV4_RELAY] No IPv4 address configured on %s,"
                    " dropping DHCP packet. Configure an IPv4 address on the VLAN"
@@ -726,6 +778,38 @@ uint8_t *decode_tlv(const uint8_t *buf, uint8_t t, uint8_t &l, uint32_t options_
     return NULL;
 }
 
+static bool is_valid_tlv_buffer(const uint8_t *buf,
+                                uint32_t options_total_size) {
+    uint32_t offset = 0;
+    if (options_total_size < DHCP_SUB_OPT_TLV_HEADER_LEN) {
+        return false;
+    }
+    while (offset < options_total_size) {
+        if ((options_total_size - offset) < DHCP_SUB_OPT_TLV_HEADER_LEN) {
+            return false;
+        }
+        const auto len = buf[offset + DHCP_SUB_OPT_TLV_LENGTH_OFFSET];
+        if (len > (options_total_size - offset - DHCP_SUB_OPT_TLV_HEADER_LEN)) {
+            return false;
+        }
+        offset += DHCP_SUB_OPT_TLV_HEADER_LEN + len;
+    }
+    return true;
+}
+
+static bool remote_id_matches_local_relay(const uint8_t *options_ptr,
+                                          uint32_t options_size) {
+    uint8_t remote_id_len = 0;
+    auto remote_id_ptr = decode_tlv(options_ptr, OPTION82_SUBOPT_REMOTE_ID,
+                                    remote_id_len, options_size);
+    if (remote_id_ptr == nullptr) {
+        return true;
+    }
+    return !local_remote_id.empty() &&
+           remote_id_len == local_remote_id.length() &&
+           memcmp(remote_id_ptr, local_remote_id.data(), remote_id_len) == 0;
+}
+
 /**
  * @code                void to_client(pcpp::DhcpLayer* dhcp_pkt, std::unordered_map<std::string,
                                         relay_config > *vlans, std::string src_ip);
@@ -739,32 +823,41 @@ uint8_t *decode_tlv(const uint8_t *buf, uint8_t t, uint8_t &l, uint32_t options_
  */
 void to_client(pcpp::DhcpLayer *dhcp_pkt, std::unordered_map<std::string, relay_config> *vlans,
                std::string src_ip) {
-    struct ifaddrs *ifa, *ifa_tmp;
     struct sockaddr_in target_addr = {0};
     uint32_t giaddr = dhcp_pkt->getDhcpHeader()->gatewayIpAddress;
     uint32_t broadcast_addr = DHCP_BROADCAST_IPADDR;
     bool pad = false;
     std::unordered_map<std::string, relay_config>::iterator config_itr = vlans->end();
 
-    if (getifaddrs(&ifa) == -1) {
-        SWSS_LOG_WARN("[DHCPV4_RELAY] getifaddrs: Unable to get network interfaces, error: %s", strerror(errno));
-        return;
-    }
-
     /* Return if giaddr is empty */
     if (giaddr == 0) {
         SWSS_LOG_ERROR("[DHCPV4_RELAY] Message received with empty giaddr from server %s",
                src_ip.c_str());
-        freeifaddrs(ifa);
         return;
     }
 
+    if (!is_local_relay_address(giaddr)) {
+        SWSS_LOG_INFO("[DHCPV4_RELAY] Ignoring server reply from %s:"
+                      " giaddr %u belongs to another relay",
+                      src_ip.c_str(), giaddr);
+        return;
+    }
+
+    const bool is_dhcp =
+        dhcp_pkt->getDhcpHeader()->magicNumber == DHCP_MAGIC_NUMBER;
     auto agent_option = dhcp_pkt->getOptionData(pcpp::DHCPOPT_DHCP_AGENT_OPTIONS);
     auto options_ptr = agent_option.getValue();
     auto agent_option_size = agent_option.getDataSize();
 
     /* If option 82 is available fetch Vlan information from circuit ID */
     if (options_ptr != NULL) {
+        if (!is_valid_tlv_buffer((const uint8_t *)options_ptr,
+                                 agent_option_size)) {
+            SWSS_LOG_WARN("[DHCPV4_RELAY] Ignoring server reply from %s:"
+                          " malformed relay agent information",
+                          src_ip.c_str());
+            return;
+        }
         uint8_t circuit_id_len = 0;
         auto circuit_id_ptr = decode_tlv((const uint8_t *)options_ptr, OPTION82_SUBOPT_CIRCUIT_ID,
                 circuit_id_len, agent_option_size);
@@ -772,7 +865,13 @@ void to_client(pcpp::DhcpLayer *dhcp_pkt, std::unordered_map<std::string, relay_
             SWSS_LOG_ERROR("[DHCPV4_RELAY] Circuit id sub-option is missing in relay"
                     " agent option from server %s",
                     src_ip.c_str());
-            freeifaddrs(ifa);
+            return;
+        }
+        if (!remote_id_matches_local_relay((const uint8_t *)options_ptr,
+                                           agent_option_size)) {
+            SWSS_LOG_INFO("[DHCPV4_RELAY] Ignoring server reply from %s:"
+                          " remote-id belongs to another relay",
+                          src_ip.c_str());
             return;
         }
 
@@ -794,45 +893,34 @@ void to_client(pcpp::DhcpLayer *dhcp_pkt, std::unordered_map<std::string, relay_
         }
     }
 
-    /* If we couldnt able to find vlan config using circuit ID
-       Walk through all the interfaces and match for giaddrs. */
+    /* If Circuit-ID does not select a VLAN, match giaddr against relay config. */
     if (config_itr == vlans->end()) {
-        std::string intf_name;
-        ifa_tmp = ifa;
-        while (ifa_tmp) {
-            if (ifa_tmp->ifa_addr && ifa_tmp->ifa_addr->sa_family == AF_INET) {
-                struct sockaddr_in *in = (struct sockaddr_in *)ifa_tmp->ifa_addr;
-                if (in->sin_addr.s_addr == giaddr) {
-                    intf_name = ifa_tmp->ifa_name;
-                    break;
-                }
+        for (auto itr = vlans->begin(); itr != vlans->end(); ++itr) {
+            if (get_relay_giaddr(itr->second, is_dhcp) != giaddr) {
+                continue;
             }
-            ifa_tmp = ifa_tmp->ifa_next;
+            if (config_itr != vlans->end()) {
+                SWSS_LOG_WARN("[DHCPV4_RELAY] Ambiguous giaddr %u matches multiple relay configs",
+                              giaddr);
+                return;
+            }
+            config_itr = itr;
         }
-        freeifaddrs(ifa);
-
-        if (intf_name.length() == 0) {
-            SWSS_LOG_ERROR("[DHCPV4_RELAY] Failed to find interface attached to address %u", giaddr);
-            return;
-        }
-
-        // TODO: Add check if interface is prefix with vlan or else try to get vlan attached to ethernet
-        //  find vlan attach using vlan map. Relay config is mapped to vlan.
-
-        /* Expecting interface is SVI interface of vlan */
-        config_itr = vlans->find(intf_name);
         if (config_itr == vlans->end()) {
-            SWSS_LOG_ERROR("[DHCPV4_RELAY] Config not found for vlan %s", intf_name.c_str());
-            dhcp_cntr_table.increment_counter(intf_name, "RX", DHCPv4_MESSAGE_TYPE_DROP);
+            SWSS_LOG_ERROR("[DHCPV4_RELAY] No relay config matches giaddr %u", giaddr);
             return;
         }
-    } else {
-        freeifaddrs(ifa);
     }
     auto config = config_itr->second;
 
+    if (giaddr != get_relay_giaddr(config, is_dhcp)) {
+        SWSS_LOG_INFO("[DHCPV4_RELAY] Ignoring server reply from %s:"
+                      " giaddr does not match relay config for %s",
+                      src_ip.c_str(), config.vlan.c_str());
+        return;
+    }
+
     dhcp_cntr_table.increment_counter(config.vlan, "RX", (int)dhcp_pkt->getMessageType());
-    /* TODO: Also check it is matching remote ID*/
 
     memcpy(&target_addr.sin_addr, &broadcast_addr, sizeof(struct in_addr));
     target_addr.sin_family = AF_INET;
@@ -1524,6 +1612,38 @@ static void apply_config_event(const event_config &received_event,
         }
     }
 
+static bool get_relay_address_event_vlan(const event_config &event,
+                                         std::string &vlan) {
+    switch (event.type) {
+    case DHCPv4_RELAY_CONFIG_UPDATE:
+    case DHCPv4_SERVER_RELAY_CONFIG_UPDATE:
+    case DHCPv4_RELAY_INTERFACE_UPDATE:
+        if (event.msg != nullptr) {
+            vlan = static_cast<relay_config *>(event.msg)->vlan;
+        }
+        break;
+    case DHCPv4_RELAY_VLAN_MEMBER_UPDATE:
+        if (event.msg != nullptr) {
+            vlan = static_cast<vlan_member_config *>(event.msg)->vlan;
+        }
+        break;
+    case DHCPv4_RELAY_VLAN_INTERFACE_UPDATE:
+        if (event.msg != nullptr) {
+            vlan = static_cast<vlan_interface_config *>(event.msg)->vlan;
+        }
+        break;
+    default:
+        break;
+    }
+    return !vlan.empty();
+}
+
+static bool event_rebuilds_all_relay_addresses(event_type type) {
+    return type == DHCPv4_RELAY_DUAL_TOR_UPDATE ||
+           type == DHCPv4_SERVER_FEATURE_UPDATE ||
+           type == DHCPv4_SERVER_IP_DELETE;
+}
+
 void config_event_callback(evutil_socket_t fd, short event, void *arg) {
     std::unordered_map<std::string, relay_config> *vlans = static_cast<std::unordered_map<std::string, relay_config> *>(arg);
     event_config received_event;
@@ -1535,7 +1655,32 @@ void config_event_callback(evutil_socket_t fd, short event, void *arg) {
         if (received_event.type == DHCPv4_RELAY_SYNC_BARRIER) {
             return;
         }
+
+        std::string address_vlan;
+        relay_config previous_config = {};
+        const bool update_one =
+            get_relay_address_event_vlan(received_event, address_vlan);
+        bool had_previous = false;
+        if (update_one) {
+            auto previous = vlans->find(address_vlan);
+            if (previous != vlans->end()) {
+                previous_config = previous->second;
+                had_previous = true;
+            }
+        }
+
         apply_config_event(received_event, vlans);
+        if (event_rebuilds_all_relay_addresses(received_event.type)) {
+            build_local_relay_addresses(*vlans);
+        } else if (update_one) {
+            if (had_previous) {
+                remove_local_relay_addresses(previous_config, *vlans);
+            }
+            auto current = vlans->find(address_vlan);
+            if (current != vlans->end()) {
+                add_local_relay_addresses(current->second);
+            }
+        }
     } else {
         SWSS_LOG_ERROR("[DHCPV4_RELAY] Failed to read config update: expected %lu bytes, got %zd bytes", sizeof(received_event), bytes_read);
     }
@@ -1638,6 +1783,7 @@ void loop_relay(std::unordered_map<std::string, relay_config> &vlans) {
             apply_config_event(ev, &vlans);
         }
     }
+    build_local_relay_addresses(vlans);
 
     // Arm the pipe and packet libevents now. Order is not strictly
     // important post-drain, but pipe-first matches the natural

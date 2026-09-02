@@ -431,6 +431,7 @@ TEST(relayConfig, handle_interface_events) {
 
     std::unordered_map<std::string, relay_config> vlans;
     vlans["Vlan100"].vlan = "Vlan100";
+    vlans["Vlan100"].source_interface = "Loopback0";
 
     relay_config *config = new relay_config();
     config->vlan = "Vlan100";
@@ -449,6 +450,20 @@ TEST(relayConfig, handle_interface_events) {
     ASSERT_TRUE(vlans.find("Vlan100") != vlans.end());
     EXPECT_EQ(vlans["Vlan100"].src_intf_sel_addr.sin_family, AF_INET);
     EXPECT_EQ(vlans["Vlan100"].src_intf_sel_addr.sin_addr.s_addr, inet_addr("192.168.1.1"));
+    EXPECT_TRUE(is_local_relay_address(inet_addr("192.168.1.1")));
+
+    relay_config *config_update = new relay_config();
+    config_update->vlan = "Vlan100";
+    config_update->is_add = true;
+    config_update->src_intf_sel_addr.sin_family = AF_INET;
+    config_update->src_intf_sel_addr.sin_addr.s_addr = inet_addr("192.168.1.2");
+    event.type = DHCPv4_RELAY_INTERFACE_UPDATE;
+    event.msg = static_cast<void *>(config_update);
+    ASSERT_NE(write(pipe_fds[1], &event, sizeof(event)), -1);
+    config_event_callback(pipe_fds[0], 0, &vlans);
+
+    EXPECT_FALSE(is_local_relay_address(inet_addr("192.168.1.1")));
+    EXPECT_TRUE(is_local_relay_address(inet_addr("192.168.1.2")));
 
     event.type = DHCPv4_SERVER_IP_UPDATE;
     global_dhcp_server_ip = "192.168.1.1";
@@ -463,6 +478,7 @@ TEST(relayConfig, handle_interface_events) {
     event.msg = NULL;
     ASSERT_NE(write(pipe_fds[1], &event, sizeof(event)), -1);
     config_event_callback(pipe_fds[0], 0, &vlans);
+    EXPECT_FALSE(is_local_relay_address(inet_addr("192.168.1.2")));
 
     close(pipe_fds[0]);
     close(pipe_fds[1]);
@@ -1001,6 +1017,77 @@ TEST(DHCPRelayTest, encode_relay_option_server_client_same_vrf) {
     EXPECT_EQ((uintptr_t)vrf_ptr, NULL);
 }
 
+static relay_config make_reply_ownership_config(
+        const std::string &vlan, const char *vlan_ip,
+        const char *source_interface = nullptr,
+        const char *source_ip = nullptr) {
+    relay_config config = {};
+    config.phy_interface = "Ethernet12";
+    config.vlan = vlan;
+    config.client_sock = 1;
+    config.link_address.sin_addr.s_addr = inet_addr(vlan_ip);
+    if (source_interface != nullptr) {
+        config.source_interface = source_interface;
+        config.src_intf_sel_addr.sin_addr.s_addr = inet_addr(source_ip);
+    }
+    return config;
+}
+
+static void add_reply_circuit_id(pcpp::DhcpLayer &dhcp_layer,
+                                 const std::string &vlan,
+                                 const std::string &remote_id = "",
+                                 bool malformed_remote_id = false) {
+    uint8_t options[96] = {};
+    const std::string circuit_id = "sonic:eth12:" + vlan;
+    size_t options_size =
+        encode_tlv(options, OPTION82_SUBOPT_CIRCUIT_ID,
+                   static_cast<uint8_t>(circuit_id.size()),
+                   reinterpret_cast<const uint8_t *>(circuit_id.data()),
+                   sizeof(options));
+    ASSERT_GT(options_size, 0U);
+    if (malformed_remote_id) {
+        options[options_size++] = OPTION82_SUBOPT_REMOTE_ID;
+        options[options_size++] = MAC_ADDR_STR_LEN;
+        options[options_size++] = 0;
+    } else if (!remote_id.empty()) {
+        const size_t remote_size =
+            encode_tlv(options + options_size, OPTION82_SUBOPT_REMOTE_ID,
+                       static_cast<uint8_t>(remote_id.size()),
+                       reinterpret_cast<const uint8_t *>(remote_id.data()),
+                       sizeof(options) - options_size);
+        ASSERT_GT(remote_size, 0U);
+        options_size += remote_size;
+    }
+    ASSERT_FALSE(dhcp_layer.addOption(
+        pcpp::DhcpOptionBuilder(pcpp::DHCPOPT_DHCP_AGENT_OPTIONS,
+                                options, options_size)).isNull());
+}
+
+TEST(DHCPRelayTest, local_relay_addresses_follow_relay_configs) {
+    relay_config first = make_reply_ownership_config(
+        "Vlan10", "192.168.10.10", "Loopback0", "10.1.0.32");
+    relay_config second = make_reply_ownership_config(
+        "Vlan20", "192.168.20.10", "Loopback0", "10.1.0.32");
+    std::unordered_map<std::string, relay_config> vlans = {
+        {"Vlan10", first}, {"Vlan20", second}};
+
+    build_local_relay_addresses(vlans);
+    EXPECT_TRUE(is_local_relay_address(inet_addr("192.168.10.10")));
+    EXPECT_TRUE(is_local_relay_address(inet_addr("192.168.20.10")));
+    EXPECT_TRUE(is_local_relay_address(inet_addr("10.1.0.32")));
+    EXPECT_FALSE(is_local_relay_address(inet_addr("192.0.2.1")));
+
+    vlans.erase("Vlan20");
+    remove_local_relay_addresses(second, vlans);
+    EXPECT_FALSE(is_local_relay_address(inet_addr("192.168.20.10")));
+    EXPECT_TRUE(is_local_relay_address(inet_addr("10.1.0.32")));
+
+    vlans.erase("Vlan10");
+    remove_local_relay_addresses(first, vlans);
+    EXPECT_FALSE(is_local_relay_address(inet_addr("192.168.10.10")));
+    EXPECT_FALSE(is_local_relay_address(inet_addr("10.1.0.32")));
+}
+
 TEST(DHCPRelayTest, to_client) {
     pcpp::EthLayer ethLayer(pcpp::MacAddress("00:13:72:25:fa:cd"), pcpp::MacAddress("00:e0:b1:49:39:02"));
     std::unordered_map<std::string, relay_config> vlans;
@@ -1016,7 +1103,7 @@ TEST(DHCPRelayTest, to_client) {
     pcpp::MacAddress clientMac(std::string("00:0e:86:11:c0:75"));
     pcpp::DhcpLayer dhcpLayer(pcpp::DHCP_OFFER, clientMac);
     dhcpLayer.getDhcpHeader()->hops = 1;
-    dhcpLayer.getDhcpHeader()->gatewayIpAddress = inet_addr("192.168.1.1");
+    dhcpLayer.getDhcpHeader()->gatewayIpAddress = inet_addr("192.168.10.10");
     dhcpLayer.getDhcpHeader()->opCode = 1;
 
     interface_list.push_back("Ethernet12");
@@ -1036,22 +1123,204 @@ TEST(DHCPRelayTest, to_client) {
     m_config.hostname = "cisco";
     m_config.host_mac_addr = "12:32:54:24:95:36";
     vlans["Vlan10"] = config;
+    build_local_relay_addresses(vlans);
     encode_relay_option(&dhcpLayer, &config);
     EXPECT_NE(dhcpLayer.getOptionData(pcpp::DHCPOPT_DHCP_AGENT_OPTIONS).getDataSize(), 0U);
 
-    struct ifaddrs *mock_ifaddrs = CreateMockIfaddrs("192.168.1.1", "255.255.255.0", "Vlan100", "192.168.1.2", "Ethernet4");
-    EXPECT_GLOBAL_CALL(getifaddrs, getifaddrs(_)).WillOnce(DoAll(testing::SetArgPointee<0>(mock_ifaddrs), Return(0)));
-    EXPECT_GLOBAL_CALL(freeifaddrs, freeifaddrs(_)).Times(1);
+    EXPECT_GLOBAL_CALL(getifaddrs, getifaddrs(_)).Times(0);
+    EXPECT_GLOBAL_CALL(freeifaddrs, freeifaddrs(_)).Times(0);
     EXPECT_GLOBAL_CALL(send_udp, send_udp(_, _, _, _, _, _, _)).WillOnce([]
 		(int sock, uint8_t* hdr, struct sockaddr_in target, uint32_t len, in_addr src_ip, bool use_src_ip, bool pad) {
         pcpp::dhcp_header* dhcp_hdr = (pcpp::dhcp_header*)hdr;
         EXPECT_EQ((dhcp_hdr->opCode), 1);
         EXPECT_EQ((dhcp_hdr->hops), 1);
-        EXPECT_EQ((dhcp_hdr->gatewayIpAddress), inet_addr("192.168.1.1"));
+        EXPECT_EQ((dhcp_hdr->gatewayIpAddress), inet_addr("192.168.10.10"));
         EXPECT_TRUE(pad);
         EXPECT_FALSE(dhcp_buffer_has_option82(reinterpret_cast<const uint8_t *>(hdr), len));
         return true;
     });
+    to_client(&dhcpLayer, &vlans, "172.22.178.234");
+}
+
+TEST(DHCPRelayTest, to_client_zero_giaddr_skips_reply_lookup) {
+    pcpp::MacAddress clientMac(std::string("00:0e:86:11:c0:75"));
+    pcpp::DhcpLayer dhcpLayer(pcpp::DHCP_OFFER, clientMac);
+    dhcpLayer.getDhcpHeader()->gatewayIpAddress = 0;
+    std::unordered_map<std::string, relay_config> vlans;
+
+    EXPECT_GLOBAL_CALL(getifaddrs, getifaddrs(_)).Times(0);
+    EXPECT_GLOBAL_CALL(freeifaddrs, freeifaddrs(_)).Times(0);
+    EXPECT_GLOBAL_CALL(send_udp, send_udp(_, _, _, _, _, _, _)).Times(0);
+    to_client(&dhcpLayer, &vlans, "172.22.178.234");
+}
+
+TEST(DHCPRelayTest, to_client_ignores_reply_owned_by_another_relay) {
+    pcpp::MacAddress clientMac(std::string("00:0e:86:11:c0:75"));
+    pcpp::DhcpLayer dhcpLayer(pcpp::DHCP_OFFER, clientMac);
+    dhcpLayer.getDhcpHeader()->gatewayIpAddress = inet_addr("192.0.2.1");
+    add_reply_circuit_id(dhcpLayer, "Vlan10");
+
+    relay_config config =
+        make_reply_ownership_config("Vlan10", "192.168.10.10");
+    std::unordered_map<std::string, relay_config> vlans = {{"Vlan10", config}};
+    build_local_relay_addresses(vlans);
+
+    EXPECT_GLOBAL_CALL(getifaddrs, getifaddrs(_)).Times(0);
+    EXPECT_GLOBAL_CALL(freeifaddrs, freeifaddrs(_)).Times(0);
+    EXPECT_GLOBAL_CALL(send_udp, send_udp(_, _, _, _, _, _, _)).Times(0);
+    to_client(&dhcpLayer, &vlans, "172.22.178.234");
+}
+
+TEST(DHCPRelayTest, to_client_accepts_local_reply_without_remote_id) {
+    pcpp::MacAddress clientMac(std::string("00:0e:86:11:c0:75"));
+    pcpp::DhcpLayer dhcpLayer(pcpp::DHCP_OFFER, clientMac);
+    dhcpLayer.getDhcpHeader()->gatewayIpAddress =
+        inet_addr("192.168.10.10");
+    add_reply_circuit_id(dhcpLayer, "Vlan10");
+
+    relay_config config =
+        make_reply_ownership_config("Vlan10", "192.168.10.10");
+    std::unordered_map<std::string, relay_config> vlans = {{"Vlan10", config}};
+    build_local_relay_addresses(vlans);
+
+    EXPECT_GLOBAL_CALL(getifaddrs, getifaddrs(_)).Times(0);
+    EXPECT_GLOBAL_CALL(freeifaddrs, freeifaddrs(_)).Times(0);
+    EXPECT_GLOBAL_CALL(send_udp, send_udp(_, _, _, _, _, _, _))
+        .WillOnce(Return(true));
+    to_client(&dhcpLayer, &vlans, "172.22.178.234");
+}
+
+TEST(DHCPRelayTest, to_client_rejects_malformed_remote_id) {
+    pcpp::MacAddress clientMac(std::string("00:0e:86:11:c0:75"));
+    pcpp::DhcpLayer dhcpLayer(pcpp::DHCP_OFFER, clientMac);
+    dhcpLayer.getDhcpHeader()->gatewayIpAddress =
+        inet_addr("192.168.10.10");
+    add_reply_circuit_id(dhcpLayer, "Vlan10", "", true);
+
+    relay_config config =
+        make_reply_ownership_config("Vlan10", "192.168.10.10");
+    std::unordered_map<std::string, relay_config> vlans = {{"Vlan10", config}};
+    build_local_relay_addresses(vlans);
+
+    EXPECT_GLOBAL_CALL(send_udp, send_udp(_, _, _, _, _, _, _)).Times(0);
+    to_client(&dhcpLayer, &vlans, "172.22.178.234");
+}
+
+TEST(DHCPRelayTest, to_client_rejects_mismatched_remote_id) {
+    pcpp::MacAddress clientMac(std::string("00:0e:86:11:c0:75"));
+    relay_config config =
+        make_reply_ownership_config("Vlan10", "192.168.10.10");
+    m_config.host_mac_addr = "12:32:54:24:95:36";
+    pcpp::DhcpLayer requestLayer(pcpp::DHCP_DISCOVER, clientMac);
+    encode_relay_option(&requestLayer, &config);
+
+    pcpp::DhcpLayer replyLayer(pcpp::DHCP_OFFER, clientMac);
+    replyLayer.getDhcpHeader()->gatewayIpAddress =
+        config.link_address.sin_addr.s_addr;
+    add_reply_circuit_id(replyLayer, "Vlan10", "00:11:22:33:44:55");
+    std::unordered_map<std::string, relay_config> vlans = {{"Vlan10", config}};
+    build_local_relay_addresses(vlans);
+
+    EXPECT_GLOBAL_CALL(send_udp, send_udp(_, _, _, _, _, _, _)).Times(0);
+    to_client(&replyLayer, &vlans, "172.22.178.234");
+}
+
+TEST(DHCPRelayTest, smartswitch_remote_id_survives_address_updates) {
+    pcpp::MacAddress clientMac(std::string("00:0e:86:11:c0:75"));
+    relay_config config =
+        make_reply_ownership_config("Vlan10", "192.168.10.10");
+    const std::string midplane_mac = get_mac_address("lo");
+    ASSERT_FALSE(midplane_mac.empty());
+    m_config.is_SmartSwitch = true;
+    m_config.midplane_bridge = "lo";
+
+    pcpp::DhcpLayer requestLayer(pcpp::DHCP_DISCOVER, clientMac);
+    encode_relay_option(&requestLayer, &config);
+    std::unordered_map<std::string, relay_config> vlans = {{"Vlan10", config}};
+    build_local_relay_addresses(vlans);
+
+    pcpp::DhcpLayer replyLayer(pcpp::DHCP_OFFER, clientMac);
+    replyLayer.getDhcpHeader()->gatewayIpAddress =
+        config.link_address.sin_addr.s_addr;
+    add_reply_circuit_id(replyLayer, "Vlan10", midplane_mac);
+
+    EXPECT_GLOBAL_CALL(send_udp, send_udp(_, _, _, _, _, _, _))
+        .WillOnce(Return(true));
+    to_client(&replyLayer, &vlans, "172.22.178.234");
+
+    m_config.is_SmartSwitch = false;
+    m_config.midplane_bridge.clear();
+}
+
+TEST(DHCPRelayTest, to_client_uses_unique_giaddr_without_option82) {
+    pcpp::MacAddress clientMac(std::string("00:0e:86:11:c0:75"));
+    pcpp::DhcpLayer dhcpLayer(pcpp::DHCP_OFFER, clientMac);
+    dhcpLayer.getDhcpHeader()->gatewayIpAddress =
+        inet_addr("192.168.10.10");
+
+    relay_config config =
+        make_reply_ownership_config("Vlan10", "192.168.10.10");
+    std::unordered_map<std::string, relay_config> vlans = {{"Vlan10", config}};
+    build_local_relay_addresses(vlans);
+
+    EXPECT_GLOBAL_CALL(send_udp, send_udp(_, _, _, _, _, _, _))
+        .WillOnce(Return(true));
+    to_client(&dhcpLayer, &vlans, "172.22.178.234");
+}
+
+TEST(DHCPRelayTest, to_client_rejects_ambiguous_giaddr_without_option82) {
+    pcpp::MacAddress clientMac(std::string("00:0e:86:11:c0:75"));
+    pcpp::DhcpLayer dhcpLayer(pcpp::DHCP_OFFER, clientMac);
+    dhcpLayer.getDhcpHeader()->gatewayIpAddress =
+        inet_addr("192.168.10.10");
+
+    relay_config first =
+        make_reply_ownership_config("Vlan10", "192.168.10.10");
+    relay_config second =
+        make_reply_ownership_config("Vlan20", "192.168.10.10");
+    std::unordered_map<std::string, relay_config> vlans = {
+        {"Vlan10", first}, {"Vlan20", second}};
+    build_local_relay_addresses(vlans);
+
+    EXPECT_GLOBAL_CALL(send_udp, send_udp(_, _, _, _, _, _, _)).Times(0);
+    to_client(&dhcpLayer, &vlans, "172.22.178.234");
+}
+
+TEST(DHCPRelayTest, to_client_rejects_circuit_id_giaddr_mismatch) {
+    pcpp::MacAddress clientMac(std::string("00:0e:86:11:c0:75"));
+    pcpp::DhcpLayer dhcpLayer(pcpp::DHCP_OFFER, clientMac);
+    dhcpLayer.getDhcpHeader()->gatewayIpAddress =
+        inet_addr("192.168.20.10");
+    add_reply_circuit_id(dhcpLayer, "Vlan10");
+
+    relay_config first =
+        make_reply_ownership_config("Vlan10", "192.168.10.10");
+    relay_config second =
+        make_reply_ownership_config("Vlan20", "192.168.20.10");
+    std::unordered_map<std::string, relay_config> vlans = {
+        {"Vlan10", first}, {"Vlan20", second}};
+    build_local_relay_addresses(vlans);
+
+    EXPECT_GLOBAL_CALL(send_udp, send_udp(_, _, _, _, _, _, _)).Times(0);
+    to_client(&dhcpLayer, &vlans, "172.22.178.234");
+}
+
+TEST(DHCPRelayTest, to_client_accepts_shared_source_giaddr_with_circuit_id) {
+    pcpp::MacAddress clientMac(std::string("00:0e:86:11:c0:75"));
+    pcpp::DhcpLayer dhcpLayer(pcpp::DHCP_OFFER, clientMac);
+    dhcpLayer.getDhcpHeader()->gatewayIpAddress = inet_addr("10.1.0.32");
+    add_reply_circuit_id(dhcpLayer, "Vlan10");
+
+    relay_config first = make_reply_ownership_config(
+        "Vlan10", "192.168.10.10", "Loopback0", "10.1.0.32");
+    relay_config second = make_reply_ownership_config(
+        "Vlan20", "192.168.20.10", "Loopback0", "10.1.0.32");
+    std::unordered_map<std::string, relay_config> vlans = {
+        {"Vlan10", first}, {"Vlan20", second}};
+    build_local_relay_addresses(vlans);
+
+    EXPECT_GLOBAL_CALL(send_udp, send_udp(_, _, _, _, _, _, _))
+        .WillOnce(Return(true));
     to_client(&dhcpLayer, &vlans, "172.22.178.234");
 }
 
