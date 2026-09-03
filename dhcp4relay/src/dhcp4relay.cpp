@@ -831,11 +831,13 @@ void to_client(pcpp::DhcpLayer *dhcp_pkt, std::unordered_map<std::string, relay_
                src_ip.c_str());
         return;
     }
+    char giaddr_str[INET_ADDRSTRLEN] = {0};
+    inet_ntop(AF_INET, &giaddr, giaddr_str, INET_ADDRSTRLEN);
 
     if (!is_local_relay_address(giaddr)) {
         SWSS_LOG_INFO("[DHCPV4_RELAY] Ignoring server reply from %s:"
-                      " giaddr %u belongs to another relay",
-                      src_ip.c_str(), giaddr);
+                      " giaddr %s belongs to another relay",
+                      src_ip.c_str(), giaddr_str);
         return;
     }
 
@@ -896,14 +898,14 @@ void to_client(pcpp::DhcpLayer *dhcp_pkt, std::unordered_map<std::string, relay_
                 continue;
             }
             if (config_itr != vlans->end()) {
-                SWSS_LOG_WARN("[DHCPV4_RELAY] Ambiguous giaddr %u matches multiple relay configs",
-                              giaddr);
+                SWSS_LOG_WARN("[DHCPV4_RELAY] Ambiguous giaddr %s matches multiple relay configs",
+                              giaddr_str);
                 return;
             }
             config_itr = itr;
         }
         if (config_itr == vlans->end()) {
-            SWSS_LOG_ERROR("[DHCPV4_RELAY] No relay config matches giaddr %u", giaddr);
+            SWSS_LOG_ERROR("[DHCPV4_RELAY] No relay config matches giaddr %s", giaddr_str);
             return;
         }
     }
