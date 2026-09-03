@@ -484,12 +484,16 @@ std::string get_mac_address(const std::string &ifname) {
 }
 
 bool initialize_local_remote_id() {
-    std::string remote_id = m_config.host_mac_addr;
-    if (m_config.is_SmartSwitch && !m_config.midplane_bridge.empty()) {
-        auto midplane_mac = get_mac_address(m_config.midplane_bridge);
-        if (!midplane_mac.empty()) {
-            remote_id = midplane_mac;
+    std::string remote_id;
+    if (m_config.is_SmartSwitch) {
+        if (m_config.midplane_bridge.empty()) {
+            SWSS_LOG_ERROR("[DHCPV4_RELAY] SmartSwitch midplane bridge is not configured");
+            local_remote_id.clear();
+            return false;
         }
+        remote_id = get_mac_address(m_config.midplane_bridge);
+    } else {
+        remote_id = m_config.host_mac_addr;
     }
 
     if (remote_id.empty() || remote_id.length() > MAC_ADDR_STR_LEN) {

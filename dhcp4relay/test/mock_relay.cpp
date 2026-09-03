@@ -1717,3 +1717,13 @@ TEST(DHCPRelayTest, initialize_local_remote_id_rejects_overlong_value) {
     m_config.host_mac_addr = "12:32:54:24:95:36";
     ASSERT_TRUE(initialize_local_remote_id());
 }
+
+TEST(DHCPRelayTest, initialize_local_remote_id_requires_smartswitch_bridge) {
+    m_config = {};
+    m_config.is_SmartSwitch = true;
+    m_config.host_mac_addr = "12:32:54:24:95:36";
+    EXPECT_FALSE(initialize_local_remote_id());
+
+    m_config.is_SmartSwitch = false;
+    ASSERT_TRUE(initialize_local_remote_id());
+}
