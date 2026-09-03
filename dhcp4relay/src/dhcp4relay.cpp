@@ -750,8 +750,10 @@ void from_client(pcpp::DhcpLayer *dhcp_pkt, relay_config &config) {
 
 uint8_t *decode_tlv(const uint8_t *buf, uint8_t t, uint8_t &l, uint32_t options_total_size) {
     uint8_t *temp = (uint8_t *)buf;
+    uint8_t *result = nullptr;
     uint32_t offset = 0;
     uint8_t len = 0;
+    uint8_t result_len = 0;
 
     while (temp && ((offset + DHCP_SUB_OPT_TLV_HEADER_LEN) <= options_total_size)) {
         len = *(temp + DHCP_SUB_OPT_TLV_LENGTH_OFFSET);
@@ -763,35 +765,21 @@ uint8_t *decode_tlv(const uint8_t *buf, uint8_t t, uint8_t &l, uint32_t options_
             l = 0;
             return NULL;
         }
-        if (t == *temp) {
+        if (t == *temp && result == nullptr) {
             SWSS_LOG_INFO("[DHCPV4_INFO] Decoding relay agent sub-option %d of len %d", t, len);
-            l = len;
-            return (temp + DHCP_SUB_OPT_TLV_HEADER_LEN);
+            result = temp + DHCP_SUB_OPT_TLV_HEADER_LEN;
+            result_len = len;
         }
         offset +=  (len + DHCP_SUB_OPT_TLV_HEADER_LEN);
         temp += (len + DHCP_SUB_OPT_TLV_HEADER_LEN);
     }
-    l = 0;
-    return NULL;
-}
-
-static bool is_valid_tlv_buffer(const uint8_t *buf,
-                                uint32_t options_total_size) {
-    uint32_t offset = 0;
-    if (options_total_size < DHCP_SUB_OPT_TLV_HEADER_LEN) {
-        return false;
+    if (offset != options_total_size) {
+        SWSS_LOG_ERROR("[DHCPV4_INFO] Failed to decode truncated relay agent sub-option header");
+        l = 0;
+        return NULL;
     }
-    while (offset < options_total_size) {
-        if ((options_total_size - offset) < DHCP_SUB_OPT_TLV_HEADER_LEN) {
-            return false;
-        }
-        const auto len = buf[offset + DHCP_SUB_OPT_TLV_LENGTH_OFFSET];
-        if (len > (options_total_size - offset - DHCP_SUB_OPT_TLV_HEADER_LEN)) {
-            return false;
-        }
-        offset += DHCP_SUB_OPT_TLV_HEADER_LEN + len;
-    }
-    return true;
+    l = result_len;
+    return result;
 }
 
 static bool remote_id_matches_local_relay(const uint8_t *options_ptr,
@@ -849,13 +837,6 @@ void to_client(pcpp::DhcpLayer *dhcp_pkt, std::unordered_map<std::string, relay_
 
     /* If option 82 is available fetch Vlan information from circuit ID */
     if (options_ptr != NULL) {
-        if (!is_valid_tlv_buffer((const uint8_t *)options_ptr,
-                                 agent_option_size)) {
-            SWSS_LOG_WARN("[DHCPV4_RELAY] Ignoring server reply from %s:"
-                          " malformed relay agent information",
-                          src_ip.c_str());
-            return;
-        }
         uint8_t circuit_id_len = 0;
         auto circuit_id_ptr = decode_tlv((const uint8_t *)options_ptr, OPTION82_SUBOPT_CIRCUIT_ID,
                 circuit_id_len, agent_option_size);

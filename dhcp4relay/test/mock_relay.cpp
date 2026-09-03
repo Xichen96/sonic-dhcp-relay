@@ -197,6 +197,14 @@ TEST(EncodeDecodeTLV, DecodeAcceptsExactFit) {
     EXPECT_EQ(length, 3);
 }
 
+TEST(EncodeDecodeTLV, DecodeRejectsTruncatedHeaderAfterMatch) {
+    uint8_t buffer[4] = {1, 1, 0x11, 2};
+    uint8_t length = 7;
+
+    EXPECT_EQ(decode_tlv(buffer, 1, length, sizeof(buffer)), nullptr);
+    EXPECT_EQ(length, 0);
+}
+
 TEST(sock, sock_open) {
   struct sock_filter ether_relay_filter[] = {
       { 0x6, 0, 0, 0x00040000 },
