@@ -856,7 +856,8 @@ bool validate_vss_reply(const uint8_t *options_ptr, uint32_t options_size,
 void to_client(pcpp::DhcpLayer *dhcp_pkt, std::unordered_map<std::string, relay_config> *vlans,
                std::string src_ip) {
     /* SAI traps DHCP replies for L3 broadcast or a local router IP. Replies
-     * for a preserved forwarded giaddr stay in the hardware forwarding path. */
+     * for a preserved forwarded giaddr stay in the hardware forwarding path
+     * and do not reach this code path. */
     struct ifaddrs *ifa, *ifa_tmp;
     struct sockaddr_in target_addr = {0};
     uint32_t giaddr = dhcp_pkt->getDhcpHeader()->gatewayIpAddress;
