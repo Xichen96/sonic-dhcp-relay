@@ -605,16 +605,16 @@ void encode_relay_option(pcpp::DhcpLayer *dhcp_pkt, relay_config *config) {
     return;
 }
 
-uint32_t get_relay_giaddr(const relay_config &config, bool is_dhcp) {
-    return (is_dhcp && !config.source_interface.empty())
+uint32_t get_relay_giaddr(const relay_config &config, bool is_bootp) {
+    return (!is_bootp && !config.source_interface.empty())
                ? config.src_intf_sel_addr.sin_addr.s_addr
                : config.link_address.sin_addr.s_addr;
 }
 
 void add_local_relay_addresses(const relay_config &config) {
     /* Non-BOOTP packets can use the VLAN IP or the Loopback0 IP on dual-ToR; BOOTP always uses the VLAN IP. */
-    const uint32_t dhcp_giaddr = get_relay_giaddr(config, true);
-    const uint32_t bootp_giaddr = get_relay_giaddr(config, false);
+    const uint32_t dhcp_giaddr = get_relay_giaddr(config, false);
+    const uint32_t bootp_giaddr = get_relay_giaddr(config, true);
     if (dhcp_giaddr != 0) {
         local_relay_addresses.insert(dhcp_giaddr);
     }
@@ -626,15 +626,15 @@ void add_local_relay_addresses(const relay_config &config) {
 void remove_local_relay_addresses(
         const relay_config &config,
         const std::unordered_map<std::string, relay_config> &vlans) {
-    const uint32_t dhcp_giaddr = get_relay_giaddr(config, true);
-    const uint32_t bootp_giaddr = get_relay_giaddr(config, false);
+    const uint32_t dhcp_giaddr = get_relay_giaddr(config, false);
+    const uint32_t bootp_giaddr = get_relay_giaddr(config, true);
     auto remove_if_unused = [&vlans](uint32_t address) {
         if (address == 0) {
             return;
         }
         for (const auto &entry : vlans) {
-            if (get_relay_giaddr(entry.second, true) == address ||
-                get_relay_giaddr(entry.second, false) == address) {
+            if (get_relay_giaddr(entry.second, false) == address ||
+                get_relay_giaddr(entry.second, true) == address) {
                 return;
             }
         }
@@ -670,11 +670,11 @@ bool is_local_relay_address(uint32_t giaddr) {
 void from_client(pcpp::DhcpLayer *dhcp_pkt, relay_config &config) {
     /* Update giaddr */
     if (!(dhcp_pkt->getDhcpHeader()->gatewayIpAddress)) {
-        const bool is_dhcp =
-            dhcp_pkt->getDhcpHeader()->magicNumber == DHCP_MAGIC_NUMBER;
+        const bool is_bootp =
+            dhcp_pkt->getDhcpHeader()->magicNumber != DHCP_MAGIC_NUMBER;
 
         dhcp_pkt->getDhcpHeader()->gatewayIpAddress =
-            get_relay_giaddr(config, is_dhcp);
+            get_relay_giaddr(config, is_bootp);
         if (!(dhcp_pkt->getDhcpHeader()->gatewayIpAddress)) {
             SWSS_LOG_ERROR("[DHCPV4_RELAY] No IPv4 address configured on %s,"
                    " dropping DHCP packet. Configure an IPv4 address on the VLAN"
@@ -682,7 +682,7 @@ void from_client(pcpp::DhcpLayer *dhcp_pkt, relay_config &config) {
             dhcp_cntr_table.increment_counter(config.vlan, "TX", DHCPv4_MESSAGE_TYPE_DROP);
             return;
         }
-        if (is_dhcp) {
+        if (!is_bootp) {
             SWSS_LOG_WARN("[DHCPV4_RELAY] encode DHCP relay option");
             encode_relay_option(dhcp_pkt, &config);
         }
@@ -841,8 +841,8 @@ void to_client(pcpp::DhcpLayer *dhcp_pkt, std::unordered_map<std::string, relay_
         return;
     }
 
-    const bool is_dhcp =
-        dhcp_pkt->getDhcpHeader()->magicNumber == DHCP_MAGIC_NUMBER;
+    const bool is_bootp =
+        dhcp_pkt->getDhcpHeader()->magicNumber != DHCP_MAGIC_NUMBER;
     auto agent_option = dhcp_pkt->getOptionData(pcpp::DHCPOPT_DHCP_AGENT_OPTIONS);
     auto options_ptr = agent_option.getValue();
     auto agent_option_size = agent_option.getDataSize();
@@ -894,7 +894,7 @@ void to_client(pcpp::DhcpLayer *dhcp_pkt, std::unordered_map<std::string, relay_
     /* If Circuit-ID does not select a VLAN, match giaddr against relay config. */
     if (config_itr == vlans->end()) {
         for (auto itr = vlans->begin(); itr != vlans->end(); ++itr) {
-            if (get_relay_giaddr(itr->second, is_dhcp) != giaddr) {
+            if (get_relay_giaddr(itr->second, is_bootp) != giaddr) {
                 continue;
             }
             if (config_itr != vlans->end()) {
@@ -911,7 +911,7 @@ void to_client(pcpp::DhcpLayer *dhcp_pkt, std::unordered_map<std::string, relay_
     }
     auto config = config_itr->second;
 
-    if (giaddr != get_relay_giaddr(config, is_dhcp)) {
+    if (giaddr != get_relay_giaddr(config, is_bootp)) {
         SWSS_LOG_INFO("[DHCPV4_RELAY] Ignoring server reply from %s:"
                       " giaddr does not match relay config for %s",
                       src_ip.c_str(), config.vlan.c_str());
