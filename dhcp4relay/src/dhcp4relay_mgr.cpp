@@ -82,19 +82,15 @@ void DHCPMgr::handle_swss_notification() {
     swss_select.addSelectable(&state_db_interface_table);
 
     /*
-     * Load DEVICE_METADATA before pushing the initial DHCPV4_RELAY snapshot
-     * and sync barrier. SubscriberStateTable cached the existing keys at
-     * construction time, so pops() returns synchronously. The main thread
-     * predrains relay configuration up to the barrier, initializes the stable
-     * relay identity, and only then arms pkt_in_callback.
+     * Push the initial DHCPV4_RELAY snapshot down config_pipe, then
+     * a DHCPv4_RELAY_SYNC_BARRIER as the last event. pops() returns
+     * synchronously because SubscriberStateTable cached the existing
+     * keys at construction time. The main thread predrains the pipe
+     * up to the barrier before arming pkt_in_callback; without this,
+     * packets arriving during startup hit an empty vlans map and
+     * produce a per-packet 'Config not found for vlan' ERR.
      */
     {
-        std::deque<swss::KeyOpFieldsValuesTuple> initial_metadata_entries;
-        config_db_device_metadata_table.pops(initial_metadata_entries);
-        if (!initial_metadata_entries.empty()) {
-            process_device_metadata_notification(initial_metadata_entries);
-        }
-
         std::deque<swss::KeyOpFieldsValuesTuple> initial_entries;
         config_db_relaymgr_table_ptr->pops(initial_entries);
         if (!initial_entries.empty()) {

@@ -332,7 +332,7 @@ size_t encode_tlv(uint8_t *buf, uint8_t t, uint8_t l, const uint8_t *v, size_t r
 uint8_t *decode_tlv(const uint8_t *buf, uint8_t t, uint8_t &l, uint32_t options_total_size);
 #ifdef UNIT_TEST
 std::string get_mac_address(const std::string &ifname);
-bool initialize_local_remote_id();
+void reset_local_remote_id();
 uint32_t get_relay_giaddr(const relay_config &config, bool is_dhcp);
 void add_local_relay_addresses(const relay_config &config);
 void remove_local_relay_addresses(

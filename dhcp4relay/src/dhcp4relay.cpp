@@ -97,6 +97,10 @@ static std::string local_remote_id;
 
 #ifdef UNIT_TEST
 using namespace swss;
+
+void reset_local_remote_id() {
+    local_remote_id.clear();
+}
 #endif
 
 std::shared_ptr<swss::DBConnector> config_db = std::make_shared<swss::DBConnector>("CONFIG_DB", 0);
@@ -483,30 +487,6 @@ std::string get_mac_address(const std::string &ifname) {
     return mac;
 }
 
-bool initialize_local_remote_id() {
-    std::string remote_id;
-    if (m_config.is_SmartSwitch) {
-        if (m_config.midplane_bridge.empty()) {
-            SWSS_LOG_ERROR("[DHCPV4_RELAY] SmartSwitch midplane bridge is not configured");
-            local_remote_id.clear();
-            return false;
-        }
-        remote_id = get_mac_address(m_config.midplane_bridge);
-    } else {
-        remote_id = m_config.host_mac_addr;
-    }
-
-    if (remote_id.empty() || remote_id.length() > MAC_ADDR_STR_LEN) {
-        SWSS_LOG_ERROR("[DHCPV4_RELAY] Invalid Remote-ID length %zu; expected 1..%d bytes",
-                       remote_id.length(), MAC_ADDR_STR_LEN);
-        local_remote_id.clear();
-        return false;
-    }
-
-    local_remote_id = remote_id;
-    return true;
-}
-
 void encode_relay_option(pcpp::DhcpLayer *dhcp_pkt, relay_config *config) {
     uint8_t buf[DHCP_OPTION_VALUE_MAX_LEN] = {0};
     uint8_t buf_offset = 0;
@@ -544,6 +524,22 @@ void encode_relay_option(pcpp::DhcpLayer *dhcp_pkt, relay_config *config) {
 
     /* Encode remote ID sub-option (required, like circuit-id) */
     /* | 2 | 6 | my_mac| */
+    if (local_remote_id.empty()) {
+        if (m_config.is_SmartSwitch) {
+            if (!m_config.midplane_bridge.empty()) {
+                local_remote_id = get_mac_address(m_config.midplane_bridge);
+            }
+        } else {
+            local_remote_id = m_config.host_mac_addr;
+        }
+        if (local_remote_id.empty()) {
+            SWSS_LOG_ERROR("[DHCPV4_RELAY] Remote-ID is not available");
+            return;
+        }
+        if (local_remote_id.length() > MAC_ADDR_STR_LEN) {
+            local_remote_id.resize(MAC_ADDR_STR_LEN);
+        }
+    }
     offset = encode_tlv((buf + buf_offset), OPTION82_SUBOPT_REMOTE_ID,
                         static_cast<uint8_t>(local_remote_id.length()),
                         reinterpret_cast<const uint8_t *>(local_remote_id.data()),
@@ -1795,9 +1791,6 @@ void loop_relay(std::unordered_map<std::string, relay_config> &vlans) {
         }
     }
     build_local_relay_addresses(vlans);
-    if (!initialize_local_remote_id()) {
-        exit(EXIT_FAILURE);
-    }
 
     // Arm the pipe and packet libevents now. Order is not strictly
     // important post-drain, but pipe-first matches the natural
