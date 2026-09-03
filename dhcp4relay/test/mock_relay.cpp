@@ -1233,6 +1233,7 @@ TEST(DHCPRelayTest, smartswitch_remote_id_survives_address_updates) {
     ASSERT_FALSE(midplane_mac.empty());
     m_config.is_SmartSwitch = true;
     m_config.midplane_bridge = "lo";
+    ASSERT_TRUE(initialize_local_remote_id());
 
     pcpp::DhcpLayer requestLayer(pcpp::DHCP_DISCOVER, clientMac);
     encode_relay_option(&requestLayer, &config);
@@ -1250,6 +1251,8 @@ TEST(DHCPRelayTest, smartswitch_remote_id_survives_address_updates) {
 
     m_config.is_SmartSwitch = false;
     m_config.midplane_bridge.clear();
+    m_config.host_mac_addr = "12:32:54:24:95:36";
+    ASSERT_TRUE(initialize_local_remote_id());
 }
 
 TEST(DHCPRelayTest, to_client_uses_unique_giaddr_without_option82) {
@@ -1661,7 +1664,7 @@ TEST(DHCPRelayTest, encode_relay_option_long_vrf_name) {
     EXPECT_FALSE(has_vss) << "VSS sub-option must be skipped for oversized VRF name";
 }
 
-TEST(DHCPRelayTest, encode_relay_option_short_mac) {
+TEST(DHCPRelayTest, encode_relay_option_uses_initialized_remote_id) {
     interface_list.clear();
     phy_interface_alias_map.clear();
     vlan_vrf_map.clear();
@@ -1680,6 +1683,8 @@ TEST(DHCPRelayTest, encode_relay_option_short_mac) {
 
     m_config.hostname = "host";
     m_config.host_mac_addr = "ab:cd";  // shorter than MAC_ADDR_STR_LEN (17)
+    ASSERT_TRUE(initialize_local_remote_id());
+    m_config.host_mac_addr = "12:32:54:24:95:36";
 
     encode_relay_option(&dhcpLayer, &config);
 
@@ -1694,10 +1699,21 @@ TEST(DHCPRelayTest, encode_relay_option_short_mac) {
         uint8_t slen = data[i + 1];
         if (type == 2) {
             has_remote_id = true;
-            EXPECT_EQ(slen, (uint8_t)m_config.host_mac_addr.length())
-                << "remote-id length must equal actual MAC string length, not MAC_ADDR_STR_LEN";
+            EXPECT_EQ(slen, 5);
+            EXPECT_EQ(memcmp(data + i + 2, "ab:cd", slen), 0);
         }
         i += 2 + slen;
     }
     EXPECT_TRUE(has_remote_id) << "remote-id sub-option must be present";
+
+    ASSERT_TRUE(initialize_local_remote_id());
+}
+
+TEST(DHCPRelayTest, initialize_local_remote_id_rejects_overlong_value) {
+    m_config = {};
+    m_config.host_mac_addr = std::string(MAC_ADDR_STR_LEN + 1, 'a');
+    EXPECT_FALSE(initialize_local_remote_id());
+
+    m_config.host_mac_addr = "12:32:54:24:95:36";
+    ASSERT_TRUE(initialize_local_remote_id());
 }
