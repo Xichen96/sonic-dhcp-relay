@@ -808,21 +808,7 @@ bool validate_vss_reply(const uint8_t *options_ptr, uint32_t options_size,
         return true;
     }
 
-    /*
-     * The request-side prerequisite drops a first-hop request owned by this
-     * relay when required local VSS cannot be added. Forward mode applies only
-     * to requests whose non-zero giaddr identifies an upstream relay and
-     * preserves that relay's Option 82, so their replies return upstream.
-     * Therefore a VSS-required reply processed here belongs to a locally owned
-     * request that carried the local VSS 151+152 pair.
-     *
-     * RFC 3046's ordinary no-space fallback predates RFC 6607. RFC 6607 uses
-     * VSS to select the client's VPN address space; without it, the server can
-     * use the global/default address space. giaddr carries only an IPv4 address
-     * and may overlap across VRFs or come from a shared source interface. A
-     * reply without matching VSS therefore cannot prove that the address came
-     * from the intended VPN and must be rejected.
-     */
+    /* #146 guarantees locally VSS-required requests carry VSS 151+152. */
     if (options_ptr == nullptr) {
         SWSS_LOG_WARN("[DHCPV4_RELAY] Dropping server reply for %s from %s: "
                       "missing relay agent information required for VSS",
@@ -840,21 +826,15 @@ bool validate_vss_reply(const uint8_t *options_ptr, uint32_t options_size,
         return false;
     }
 
-    const auto &client_vrf = client_vrf_itr->second;
     uint8_t vss_len = 0;
     auto vss_ptr = decode_tlv(options_ptr, OPTION82_SUBOPT_VIRTUAL_SUBNET,
                               vss_len, options_size);
-    if (vss_ptr == nullptr) {
+    const auto &client_vrf = client_vrf_itr->second;
+    if (vss_ptr == nullptr || vss_len != client_vrf.length() + 1 ||
+        vss_ptr[0] != 0 ||
+        memcmp(vss_ptr + 1, client_vrf.data(), client_vrf.length()) != 0) {
         SWSS_LOG_WARN("[DHCPV4_RELAY] Dropping server reply for %s from %s: "
-                      "missing VSS sub-option",
-                      config.vlan.c_str(), src_ip.c_str());
-        return false;
-    }
-
-    if ((vss_len != (client_vrf.length() + 1)) || (vss_ptr[0] != 0) ||
-        (memcmp(vss_ptr + 1, client_vrf.data(), client_vrf.length()) != 0)) {
-        SWSS_LOG_WARN("[DHCPV4_RELAY] Dropping server reply for %s from %s: "
-                      "mismatched VSS sub-option",
+                      "missing or mismatched VSS sub-option",
                       config.vlan.c_str(), src_ip.c_str());
         return false;
     }
@@ -875,6 +855,8 @@ bool validate_vss_reply(const uint8_t *options_ptr, uint32_t options_size,
  */
 void to_client(pcpp::DhcpLayer *dhcp_pkt, std::unordered_map<std::string, relay_config> *vlans,
                std::string src_ip) {
+    /* SAI traps DHCP replies for L3 broadcast or a local router IP. Replies
+     * for a preserved forwarded giaddr stay in the hardware forwarding path. */
     struct ifaddrs *ifa, *ifa_tmp;
     struct sockaddr_in target_addr = {0};
     uint32_t giaddr = dhcp_pkt->getDhcpHeader()->gatewayIpAddress;

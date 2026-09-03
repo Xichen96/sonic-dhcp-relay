@@ -1040,10 +1040,10 @@ static uint32_t build_vss_reply_options(uint8_t (&options)[N],
                                         bool include_vss_control) {
     uint32_t offset = 0;
     if (include_vss) {
-        std::vector<uint8_t> vss_data(vrf.length() + 1, 0);
-        memcpy(vss_data.data() + 1, vrf.data(), vrf.length());
+        uint8_t vss_data[OPTION82_VSS_VRF_MAX_LEN + 1] = {};
+        memcpy(vss_data + 1, vrf.data(), vrf.length());
         offset += encode_tlv(options + offset, OPTION82_SUBOPT_VIRTUAL_SUBNET,
-                             static_cast<uint8_t>(vss_data.size()), vss_data.data(),
+                             static_cast<uint8_t>(vrf.length() + 1), vss_data,
                              N - offset);
     }
     if (include_vss_control) {
@@ -1060,25 +1060,33 @@ TEST(DHCPRelayTest, validate_vss_reply) {
     config.vrf_selection_opt = "enable";
     vlan_vrf_map["Vlan10"] = "Vrf01";
 
+    struct vss_case {
+        const char *vrf;
+        bool include_vss;
+        bool include_control;
+        bool valid;
+    };
+    const vss_case cases[] = {
+        {"Vrf01", true, false, true},
+        {"Vrf01", true, true, false},
+        {"Vrf02", true, false, false},
+        {"Vrf01", false, false, false},
+    };
+    for (const auto &test : cases) {
+        uint8_t options[32] = {};
+        auto size = build_vss_reply_options(
+            options, test.vrf, test.include_vss, test.include_control);
+        EXPECT_EQ(validate_vss_reply(options, size, config, "192.0.2.1"),
+                  test.valid);
+    }
+
     uint8_t options[32] = {};
     auto options_size = build_vss_reply_options(options, "Vrf01", true, false);
-    EXPECT_TRUE(validate_vss_reply(options, options_size, config, "192.0.2.1"));
-
-    options_size = build_vss_reply_options(options, "Vrf01", true, true);
-    EXPECT_FALSE(validate_vss_reply(options, options_size, config, "192.0.2.1"));
-
-    options_size = build_vss_reply_options(options, "Vrf01", true, false);
     options[options_size++] = OPTION82_SUBOPT_VIRTUAL_SUBNET_CONTROL;
     options[options_size++] = 1;
     EXPECT_FALSE(validate_vss_reply(options, options_size, config, "192.0.2.1"));
 
-    options_size = build_vss_reply_options(options, "Vrf02", true, false);
-    EXPECT_FALSE(validate_vss_reply(options, options_size, config, "192.0.2.1"));
-
     EXPECT_FALSE(validate_vss_reply(nullptr, 0, config, "192.0.2.1"));
-
-    options_size = build_vss_reply_options(options, "Vrf01", false, false);
-    EXPECT_FALSE(validate_vss_reply(options, options_size, config, "192.0.2.1"));
 
     uint8_t circuit_id = 1;
     options_size = encode_tlv(options, OPTION82_SUBOPT_CIRCUIT_ID, 1,
