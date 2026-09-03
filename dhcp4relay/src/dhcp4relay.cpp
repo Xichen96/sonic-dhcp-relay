@@ -525,25 +525,15 @@ void encode_relay_option(pcpp::DhcpLayer *dhcp_pkt, relay_config *config) {
     /* Encode remote ID sub-option (required, like circuit-id) */
     /* | 2 | 6 | my_mac| */
     if (local_remote_id.empty()) {
-        if (m_config.is_SmartSwitch) {
-            if (!m_config.midplane_bridge.empty()) {
-                local_remote_id = get_mac_address(m_config.midplane_bridge);
-            }
-        } else {
-            local_remote_id = m_config.host_mac_addr;
-        }
+        local_remote_id = m_config.is_SmartSwitch ? get_mac_address(m_config.midplane_bridge) : m_config.host_mac_addr;
         if (local_remote_id.empty()) {
             SWSS_LOG_ERROR("[DHCPV4_RELAY] Remote-ID is not available");
             return;
         }
-        if (local_remote_id.length() > MAC_ADDR_STR_LEN) {
-            local_remote_id.resize(MAC_ADDR_STR_LEN);
-        }
+        local_remote_id.resize(std::min(local_remote_id.length(), (size_t)MAC_ADDR_STR_LEN));
     }
-    offset = encode_tlv((buf + buf_offset), OPTION82_SUBOPT_REMOTE_ID,
-                        static_cast<uint8_t>(local_remote_id.length()),
-                        reinterpret_cast<const uint8_t *>(local_remote_id.data()),
-                        sizeof(buf) - buf_offset);
+    offset = encode_tlv((buf + buf_offset), OPTION82_SUBOPT_REMOTE_ID, (uint8_t)local_remote_id.length(),
+                        (uint8_t *)local_remote_id.c_str(), sizeof(buf) - buf_offset);
     if (!offset) {
         SWSS_LOG_ERROR("[DHCPV4_RELAY] remote-id does not fit after circuit-id on %s, dropping option 82",
                        config->vlan.c_str());
@@ -813,8 +803,7 @@ static bool remote_id_matches_local_relay(const uint8_t *options_ptr,
         return true;
     }
     return !local_remote_id.empty() &&
-           remote_id_len == local_remote_id.length() &&
-           memcmp(remote_id_ptr, local_remote_id.data(), remote_id_len) == 0;
+           local_remote_id == std::string((const char *)remote_id_ptr, remote_id_len);
 }
 
 /**
