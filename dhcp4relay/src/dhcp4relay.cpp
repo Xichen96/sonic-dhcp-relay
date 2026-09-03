@@ -611,46 +611,14 @@ uint32_t get_relay_giaddr(const relay_config &config, bool is_bootp) {
                : config.link_address.sin_addr.s_addr;
 }
 
-void add_local_relay_addresses(const relay_config &config) {
-    /* Non-BOOTP packets can use the VLAN IP or the Loopback0 IP on dual-ToR; BOOTP always uses the VLAN IP. */
-    const uint32_t dhcp_giaddr = get_relay_giaddr(config, false);
-    const uint32_t bootp_giaddr = get_relay_giaddr(config, true);
-    if (dhcp_giaddr != 0) {
-        local_relay_addresses.insert(dhcp_giaddr);
-    }
-    if (bootp_giaddr != 0) {
-        local_relay_addresses.insert(bootp_giaddr);
-    }
-}
-
-void remove_local_relay_addresses(
-        const relay_config &config,
-        const std::unordered_map<std::string, relay_config> &vlans) {
-    const uint32_t dhcp_giaddr = get_relay_giaddr(config, false);
-    const uint32_t bootp_giaddr = get_relay_giaddr(config, true);
-    auto remove_if_unused = [&vlans](uint32_t address) {
-        if (address == 0) {
-            return;
-        }
-        for (const auto &entry : vlans) {
-            if (get_relay_giaddr(entry.second, false) == address ||
-                get_relay_giaddr(entry.second, true) == address) {
-                return;
-            }
-        }
-        local_relay_addresses.erase(address);
-    };
-
-    remove_if_unused(dhcp_giaddr);
-    remove_if_unused(bootp_giaddr);
-}
-
 void build_local_relay_addresses(
         const std::unordered_map<std::string, relay_config> &vlans) {
     local_relay_addresses.clear();
     for (const auto &entry : vlans) {
-        add_local_relay_addresses(entry.second);
+        local_relay_addresses.insert(get_relay_giaddr(entry.second, false));
+        local_relay_addresses.insert(get_relay_giaddr(entry.second, true));
     }
+    local_relay_addresses.erase(0);
 }
 
 bool is_local_relay_address(uint32_t giaddr) {
@@ -1591,38 +1559,6 @@ static void apply_config_event(const event_config &received_event,
         }
     }
 
-static bool get_relay_address_event_vlan(const event_config &event,
-                                         std::string &vlan) {
-    switch (event.type) {
-    case DHCPv4_RELAY_CONFIG_UPDATE:
-    case DHCPv4_SERVER_RELAY_CONFIG_UPDATE:
-    case DHCPv4_RELAY_INTERFACE_UPDATE:
-        if (event.msg != nullptr) {
-            vlan = static_cast<relay_config *>(event.msg)->vlan;
-        }
-        break;
-    case DHCPv4_RELAY_VLAN_MEMBER_UPDATE:
-        if (event.msg != nullptr) {
-            vlan = static_cast<vlan_member_config *>(event.msg)->vlan;
-        }
-        break;
-    case DHCPv4_RELAY_VLAN_INTERFACE_UPDATE:
-        if (event.msg != nullptr) {
-            vlan = static_cast<vlan_interface_config *>(event.msg)->vlan;
-        }
-        break;
-    default:
-        break;
-    }
-    return !vlan.empty();
-}
-
-static bool event_rebuilds_all_relay_addresses(event_type type) {
-    return type == DHCPv4_RELAY_DUAL_TOR_UPDATE ||
-           type == DHCPv4_SERVER_FEATURE_UPDATE ||
-           type == DHCPv4_SERVER_IP_DELETE;
-}
-
 void config_event_callback(evutil_socket_t fd, short event, void *arg) {
     std::unordered_map<std::string, relay_config> *vlans = static_cast<std::unordered_map<std::string, relay_config> *>(arg);
     event_config received_event;
@@ -1635,31 +1571,8 @@ void config_event_callback(evutil_socket_t fd, short event, void *arg) {
             return;
         }
 
-        std::string address_vlan;
-        relay_config previous_config = {};
-        const bool update_one =
-            get_relay_address_event_vlan(received_event, address_vlan);
-        bool had_previous = false;
-        if (update_one) {
-            auto previous = vlans->find(address_vlan);
-            if (previous != vlans->end()) {
-                previous_config = previous->second;
-                had_previous = true;
-            }
-        }
-
         apply_config_event(received_event, vlans);
-        if (event_rebuilds_all_relay_addresses(received_event.type)) {
-            build_local_relay_addresses(*vlans);
-        } else if (update_one) {
-            if (had_previous) {
-                remove_local_relay_addresses(previous_config, *vlans);
-            }
-            auto current = vlans->find(address_vlan);
-            if (current != vlans->end()) {
-                add_local_relay_addresses(current->second);
-            }
-        }
+        build_local_relay_addresses(*vlans);
     } else {
         SWSS_LOG_ERROR("[DHCPV4_RELAY] Failed to read config update: expected %lu bytes, got %zd bytes", sizeof(received_event), bytes_read);
     }

@@ -1086,12 +1086,12 @@ TEST(DHCPRelayTest, local_relay_addresses_follow_relay_configs) {
     EXPECT_FALSE(is_local_relay_address(inet_addr("192.0.2.1")));
 
     vlans.erase("Vlan20");
-    remove_local_relay_addresses(second, vlans);
+    build_local_relay_addresses(vlans);
     EXPECT_FALSE(is_local_relay_address(inet_addr("192.168.20.10")));
     EXPECT_TRUE(is_local_relay_address(inet_addr("10.1.0.32")));
 
     vlans.erase("Vlan10");
-    remove_local_relay_addresses(first, vlans);
+    build_local_relay_addresses(vlans);
     EXPECT_FALSE(is_local_relay_address(inet_addr("192.168.10.10")));
     EXPECT_FALSE(is_local_relay_address(inet_addr("10.1.0.32")));
 }
