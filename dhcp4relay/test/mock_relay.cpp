@@ -1700,8 +1700,8 @@ TEST(DHCPRelayTest, encode_relay_option_reuses_initialized_remote_id) {
         uint8_t slen = data[i + 1];
         if (type == 2) {
             has_remote_id = true;
-            EXPECT_EQ(slen, (uint8_t)m_config.host_mac_addr.length())
-                << "remote-id length must equal actual MAC string length, not MAC_ADDR_STR_LEN";
+            EXPECT_EQ(slen, 5);
+            EXPECT_EQ(memcmp(data + i + 2, "ab:cd", slen), 0);
         }
         i += 2 + slen;
     }
