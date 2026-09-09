@@ -1,0 +1,123 @@
+name: Isolated 202411 validation
+
+on:
+  push:
+    branches:
+      - dev/xichenlin/validate-pr148-202411-ci-1828720a
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and test (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            platform: linux/amd64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
+          - arch: armhf
+            runner: ubuntu-24.04
+            platform: linux/arm/v7
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - name: Verify unchanged release source
+        shell: bash
+        run: |
+          set -euo pipefail
+          source=839f83d83722149ac0800f8797bde21af668c071
+          git merge-base --is-ancestor "$source" HEAD
+          git diff --exit-code "$source" HEAD -- . \
+            ':(exclude).github/workflows/202411-validation.yml' \
+            ':(exclude).github/ci/202411-dependencies.py' \
+            ':(exclude).github/ci/202411-validation.sh'
+          mkdir ci-evidence
+          { git rev-parse HEAD; git submodule status --recursive; git diff --stat "$source" HEAD; } > ci-evidence/source.txt
+      - name: Enable ARM32 emulation
+        if: matrix.arch == 'armhf'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm
+      - name: Build package and run the complete existing unit suite
+        shell: bash
+        env:
+          ARCH: ${{ matrix.arch }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          docker pull --platform "$PLATFORM" debian:bookworm
+          docker image inspect debian:bookworm --format '{{json .RepoDigests}}' > ci-evidence/container.txt
+          docker run --rm --platform "$PLATFORM" \
+            --mount "type=bind,src=$PWD,dst=/work/source" \
+            --workdir /work/source debian:bookworm \
+            bash .github/ci/202411-validation.sh "$ARCH" test
+          git diff --exit-code HEAD
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-202411-${{ matrix.arch }}
+          path: ci-evidence/
+          if-no-files-found: error
+
+  codeql:
+    name: CodeQL (existing query configuration)
+    runs-on: ubuntu-24.04
+    container: debian:bookworm
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - name: Bootstrap the Bookworm container
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git libstdc++6
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - name: Verify unchanged release source
+        shell: bash
+        run: |
+          set -euo pipefail
+          source=839f83d83722149ac0800f8797bde21af668c071
+          git merge-base --is-ancestor "$source" HEAD
+          git diff --exit-code "$source" HEAD -- . \
+            ':(exclude).github/workflows/202411-validation.yml' \
+            ':(exclude).github/ci/202411-dependencies.py' \
+            ':(exclude).github/ci/202411-validation.sh'
+          mkdir ci-evidence
+          { git rev-parse HEAD; git submodule status --recursive; git diff --stat "$source" HEAD; } > ci-evidence/source.txt
+      - name: Install matching release dependencies
+        run: bash .github/ci/202411-validation.sh amd64 prepare
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: cpp
+          build-mode: manual
+          config-file: ./.github/codeql/codeql-config.yml
+          tools: https://github.com/github/codeql-action/releases/download/codeql-bundle-v2.26.4/codeql-bundle-linux64.tar.gz
+      - name: Trace the existing full build
+        run: make -j2 all
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:cpp/isolated-202411
+          output: ci-evidence/codeql
+          upload-database: false
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-202411-codeql
+          path: ci-evidence/
+          if-no-files-found: error
