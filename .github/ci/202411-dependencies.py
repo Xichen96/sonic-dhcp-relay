@@ -48,14 +48,14 @@ def download(artifact, file_id, name):
 arch, destination, evidence = sys.argv[1:]
 artifact, manifest_id = ARCH_ARTIFACTS[arch]
 manifest = json.loads(download(artifact, manifest_id, "manifest.json"))
-entries = {item["path"]: item["blob"] for item in manifest["items"]}
+entries = {item["path"]: item for item in manifest["items"]}
 destination = pathlib.Path(destination)
 destination.mkdir(parents=True, exist_ok=True)
 receipt = {"build": 1214622, "artifact": artifact, "manifest": manifest_id, "files": []}
 
 for package, version in PACKAGES.items():
     name = f"{package}_{version}_{arch}.deb"
-    blob = entries[f"/target/debs/bookworm/{name}"]
+    blob = entries[f"/target/debs/bookworm/{name}"]["blob"]
     content = download(artifact, blob["id"], name)
     if len(content) != blob["size"]:
         raise RuntimeError(f"Size mismatch for {name}: {len(content)} != {blob['size']}")

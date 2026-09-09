@@ -92,6 +92,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          git config --global --add safe.directory "$PWD"
+          git config --global --add safe.directory "$PWD/gmock_global"
           source=839f83d83722149ac0800f8797bde21af668c071
           git merge-base --is-ancestor "$source" HEAD
           git diff --exit-code "$source" HEAD -- . \
