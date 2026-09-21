@@ -16,7 +16,7 @@ override CPPFLAGS += -Wall -std=c++17 -fPIE -I/usr/include/swss
 override CPPFLAGS += -MMD -MP -MF"$(@:%.o=%.d)" -MT"$(@)"
 CPPFLAGS_TEST := --coverage -fprofile-arcs -ftest-coverage -fprofile-generate -fsanitize=address
 LDLIBS_TEST := --coverage -lgtest -lgmock -pthread -lstdc++fs -fsanitize=address
-LDLIBS_TEST += -Wl,--wrap=getifaddrs,--wrap=freeifaddrs,--wrap=bind,--wrap=sleep
+LDLIBS_TEST += -Wl,--wrap=getifaddrs,--wrap=freeifaddrs,--wrap=bind
 PWD := $(shell pwd)
 
 all: $(DHCP6RELAY_TARGET) $(DHCP6RELAY_TEST_TARGET)
