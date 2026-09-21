@@ -107,28 +107,6 @@ jobs:
       cp ../*.deb $(Build.ArtifactStagingDirectory)
     workingDirectory: dhcp6relay
     displayName: "Compile sonic dhcp6relay"
-  - ${{ if eq(parameters.arch, 'amd64') }}:
-    - script: |
-        set -euo pipefail
-        saved=$(mktemp -d)
-        cp src/relay.cpp src/relay.h "$saved/"
-        cp build-test/dhcp6relay-test "$saved/"
-        trap 'cp "$saved/relay.cpp" src/relay.cpp; cp "$saved/relay.h" src/relay.h; cp "$saved/dhcp6relay-test" build-test/dhcp6relay-test; rm -rf "$saved"' EXIT
-        sha256sum test/mock_address_selection.cpp
-        git fetch --no-tags --depth=1 https://github.com/sonic-net/sonic-dhcp-relay.git 633c8e1736854fca52553255a9abb9d0f704ce0e
-        git show 633c8e1736854fca52553255a9abb9d0f704ce0e:dhcp6relay/src/relay.cpp > src/relay.cpp
-        git show 633c8e1736854fca52553255a9abb9d0f704ce0e:dhcp6relay/src/relay.h > src/relay.h
-        make -j2 build-test/dhcp6relay-test
-        set +e
-        sudo ASAN_OPTIONS=detect_leaks=0 ./build-test/dhcp6relay-test --gtest_filter='address_order/VlanAddressSelection.primary_identity/*' --gtest_output=xml:build-test/primary-address-before.xml > build-test/primary-address-before.log 2>&1
-        result=$?
-        set -e
-        cat build-test/primary-address-before.log
-        test "$result" -eq 1
-        python3 -c 'import xml.etree.ElementTree as E; r=E.parse("build-test/primary-address-before.xml").getroot(); cases=r.findall(".//testcase"); assert len(cases)==3 and r.get("tests")=="3" and r.get("failures")=="3" and r.get("errors")=="0", E.tostring(r); assert all(c.find("failure") is not None and all("primary" in f.get("message", "") for f in c.findall("failure")) for c in cases); print("BASELINE: the same 3 primary-address cases failed on address-selection assertions without the production fix")'
-        sha256sum test/mock_address_selection.cpp
-      workingDirectory: dhcp6relay
-      displayName: "Prove three address regressions fail without fix (temporary)"
   - script: |
       rm ../*.deb || true
       # Configure git identity for patch application
